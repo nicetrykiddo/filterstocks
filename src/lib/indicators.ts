@@ -31,6 +31,12 @@ export function rollingMin(xs: number[], n: number): (number | null)[] {
   return out;
 }
 
+export function median(xs: number[]): number {
+  if (!xs.length) return 0;
+  const s = [...xs].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+}
+
 /** Wilder-style average true range over n sessions. */
 export function atr(
   highs: number[],
@@ -67,6 +73,30 @@ export function atr(
   return out;
 }
 
+/** Wilder RSI over n sessions. */
+export function rsi(closes: number[], n = 14): (number | null)[] {
+  const out: (number | null)[] = new Array(closes.length).fill(null);
+  let avgUp = 0;
+  let avgDn = 0;
+  for (let i = 1; i < closes.length; i++) {
+    const ch = closes[i] - closes[i - 1];
+    const up = Math.max(ch, 0);
+    const dn = Math.max(-ch, 0);
+    if (i <= n) {
+      avgUp += up / n;
+      avgDn += dn / n;
+      if (i === n) {
+        out[i] = avgDn === 0 ? 100 : 100 - 100 / (1 + avgUp / avgDn);
+      }
+    } else {
+      avgUp = (avgUp * (n - 1) + up) / n;
+      avgDn = (avgDn * (n - 1) + dn) / n;
+      out[i] = avgDn === 0 ? 100 : 100 - 100 / (1 + avgUp / avgDn);
+    }
+  }
+  return out;
+}
+
 /** Population standard deviation over the trailing n values. */
 export function rollingStdev(xs: number[], n: number): (number | null)[] {
   const out: (number | null)[] = new Array(xs.length).fill(null);
@@ -81,8 +111,34 @@ export function rollingStdev(xs: number[], n: number): (number | null)[] {
   return out;
 }
 
+export interface Pivot {
+  idx: number;
+  high: boolean;
+  price: number;
+}
+
+/**
+ * Swing pivots on a series using a k-bar fractal window: a pivot high is a
+ * value greater than the k values either side of it. Returns pivots in order.
+ */
+export function fractalPivots(xs: number[], k = 3): Pivot[] {
+  const out: Pivot[] = [];
+  for (let i = k; i < xs.length - k; i++) {
+    let isHigh = true;
+    let isLow = true;
+    for (let j = i - k; j <= i + k; j++) {
+      if (j === i) continue;
+      if (xs[j] > xs[i]) isHigh = false;
+      if (xs[j] < xs[i]) isLow = false;
+    }
+    if (isHigh) out.push({ idx: i, high: true, price: xs[i] });
+    else if (isLow) out.push({ idx: i, high: false, price: xs[i] });
+  }
+  return out;
+}
+
 export function pctChange(from: number, to: number): number {
-  return (to / from - 1) * 100;
+  return from === 0 ? 0 : (to / from - 1) * 100;
 }
 
 export function round2(x: number): number {

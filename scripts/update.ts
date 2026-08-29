@@ -1,49 +1,55 @@
 /**
  * Daily data pipeline.
  *
- *   tsx scripts/update.ts [--days 550]
+ *   tsx scripts/update.ts [--days 700] [--skip-fundamentals]
  *
- * 1. Loads data/bars.json (adjusted daily bars for the scan universe).
- * 2. Downloads any missing sessions from NSE's public bhavcopy archive,
- *    appending one day at a time. Corporate actions are stitched using the
- *    exchange's own PrvsClsgPric: when the stated previous close diverges
- *    from our stored close by more than 2%, the whole stored history is
+ * 1. Loads data/bars.json (adjusted daily bars for the scan universe, one
+ *    primary tape per symbol).
+ * 2. Downloads any missing sessions from both exchanges' public bhavcopy
+ *    archives, appending one day at a time. Corporate actions are stitched
+ *    using the exchange's own PrvsClsgPric: when the stated previous close
+ *    diverges from our stored close by more than 2%, the stored history is
  *    rescaled to the new share basis.
- * 3. Regenerates public/scan.json for the dashboard.
+ * 3. Refreshes the fundamentals cache when older than a week (Screener.in;
+ *    skipped with --skip-fundamentals).
+ * 4. Regenerates public/scan.json for the dashboard.
  *
- * Run locally for the initial backfill, then daily from the GitHub Action.
+ * The first run is a long backfill; later runs fetch only missing sessions.
  */
-
 import fs from "node:fs";
 import path from "node:path";
-import { fetchBhavday, fetchIndexDay, toYmd } from "../src/lib/nse";
 import type { DayRow } from "../src/lib/nse";
+import { fetchBhavday, fetchBseDay, fetchIndexDay, toYmd } from "../src/lib/nse";
 import { runScan } from "../src/lib/engine";
-import { UNIVERSE } from "../src/lib/universe";
+import { UNIVERSE, UNIVERSE_SNAPSHOT } from "../src/lib/universe";
 import type { Bar } from "../src/lib/types";
 
 const ROOT = path.resolve(__dirname, "..");
 const BARS_FILE = path.join(ROOT, "data", "bars.json");
 const SCAN_FILE = path.join(ROOT, "public", "scan.json");
 
+/** Store v2: one primary tape per symbol, tracked in meta. */
 interface Store {
+  version: 2;
   updated: string;
   index: Array<[string, number]>;
+  meta: Record<string, { ex: "NSE" | "BSE" }>;
   stocks: Record<string, Array<[string, number, number, number, number, number]>>;
 }
 
-const MAX_HISTORY = 420; // sessions kept per symbol (~SMA200 + trace + margin)
+const MAX_HISTORY = 720; // sessions kept per symbol (~weekly indicators + margin)
 const STITCH_THRESHOLD = 0.02;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function loadStore(): Store {
   if (fs.existsSync(BARS_FILE)) {
-    const store = JSON.parse(fs.readFileSync(BARS_FILE, "utf8")) as Store;
-    migrateAliases(store);
-    return store;
+    const raw = JSON.parse(fs.readFileSync(BARS_FILE, "utf8")) as Partial<Store>;
+    // v1 stores had no version field; the schema changed wholesale, restart.
+    if (raw.version === 2) return migrateAliases(raw as Store);
+    console.log("v1 store found; starting a fresh v2 store (schema changed)");
   }
-  return { updated: "", index: [], stocks: {} };
+  return { version: 2, updated: "", index: [], meta: {}, stocks: {} };
 }
 
 /** Moves bars stored under predecessor tickers into their current symbol. */
@@ -56,10 +62,13 @@ function migrateAliases(store: Store) {
       const byDate = new Map(main.map((b) => [b[0], b]));
       for (const b of aliasBars) if (!byDate.has(b[0])) byDate.set(b[0], b);
       store.stocks[u.symbol] = [...byDate.values()].sort((a, b) => (a[0] < b[0] ? -1 : 1));
+      store.meta[u.symbol] = store.meta[alias] ?? store.meta[u.symbol];
       delete store.stocks[alias];
+      delete store.meta[alias];
       console.log(`migrated alias ${alias} -> ${u.symbol} (${aliasBars.length} bars)`);
     }
   }
+  return store;
 }
 
 function saveStore(store: Store) {
@@ -71,13 +80,11 @@ function sessionDates(store: Store): Set<string> {
   return new Set(store.index.map(([d]) => d));
 }
 
-/** All calendar days from `from` (YYYY-MM-DD, exclusive) through today, minus weekends. */
 function candidateDays(from: string): string[] {
   const out: string[] = [];
   const start = new Date(from + "T12:00:00Z");
   start.setUTCDate(start.getUTCDate() + 1);
-  const today = new Date();
-  for (let d = new Date(start); d <= today; d.setUTCDate(d.getUTCDate() + 1)) {
+  for (let d = new Date(start); d <= new Date(); d.setUTCDate(d.getUTCDate() + 1)) {
     const dow = d.getUTCDay();
     if (dow === 0 || dow === 6) continue;
     out.push(toYmd(new Date(d.getTime())));
@@ -97,19 +104,19 @@ function backfillDays(n: number): string[] {
   return out;
 }
 
-function appendDay(store: Store, ymd: string, day: DayRow, idxBar: Bar | null) {
+function appendDay(store: Store, ymd: string, nseDay: DayRow | null, bseDay: DayRow | null, idxBar: Bar | null) {
   for (const u of UNIVERSE) {
-    // A renamed name: the alias row carries the pre-rename session.
-    const row = day.rows.get(u.symbol) ?? u.aliases.map((a) => day.rows.get(a)).find((r) => r);
-    if (!row) continue;
+    const day = u.exchange === "NSE" ? nseDay : bseDay;
+    const row = day?.rows.get(u.symbol) ?? u.aliases.map((a) => day?.rows.get(a)).find((r) => r);
+    if (!row || !day) continue;
     const hist = store.stocks[u.symbol] ?? [];
+    if (!store.meta[u.symbol]) store.meta[u.symbol] = { ex: u.exchange };
     if (hist.some((b) => b[0] === ymd)) continue; // already stored (re-walk)
     const last = hist[hist.length - 1];
 
     if (last && last[4] > 0 && row.prevClose > 0) {
       const ratio = row.prevClose / last[4];
       if (Math.abs(ratio - 1) > STITCH_THRESHOLD) {
-        // Split / bonus / rights: rescale stored history to today's basis.
         for (const b of hist) {
           b[1] = round(b[1] * ratio);
           b[2] = round(b[2] * ratio);
@@ -139,40 +146,38 @@ function round(x: number): number {
 async function main() {
   const args = process.argv.slice(2);
   const daysFlagIdx = args.indexOf("--days");
+  const skipFund = args.includes("--skip-fundamentals");
   const store = loadStore();
   const have = sessionDates(store);
   let days: string[];
 
-  // Symbols added or renamed since the last run have no bars; re-walk the
-  // full window so they pick up their own trading history.
   const hasNewSymbols = UNIVERSE.some((u) => !store.stocks[u.symbol]?.length);
   if (daysFlagIdx !== -1 && args[daysFlagIdx + 1]) {
     days = backfillDays(Number(args[daysFlagIdx + 1]));
   } else if (store.updated && !hasNewSymbols) {
     days = candidateDays(store.updated);
   } else {
-    days = backfillDays(550);
+    days = backfillDays(760); // ~2 years of sessions
   }
 
   let missing = days.filter((d) => !have.has(d));
-  if (hasNewSymbols) {
-    // Re-walk every session so symbols added since the last run can pick up
-    // their own history; per-symbol date checks prevent duplicate bars.
+  if (hasNewSymbols && store.updated) {
+    // Re-walk every session so symbols added since the last run pick up their
+    // own trading history; per-symbol date checks prevent duplicate bars.
     missing = days;
     console.log("new symbols detected; re-walking the full window");
   }
-  console.log(`store has ${store.index.length} sessions; ${missing.length} candidate days to try (${missing[0] ?? "-"} .. ${missing[missing.length - 1] ?? "-"})`);
+  console.log(
+    `store has ${store.index.length} sessions; ${missing.length} candidate days to try (${missing[0] ?? "-"} .. ${missing[missing.length - 1] ?? "-"})`,
+  );
 
   if (missing.length === 0) {
     console.log("store is already current");
   } else {
-    // Health-check only, against a date we know was a real session (the
-    // store's own last date). Probing recent *missing* days would probe
-    // holidays, which have no bhavcopy at all.
-    const probeTargets = store.updated
-      ? [store.updated]
-      : [...missing].reverse().slice(0, 6);
+    // Health-check against the store's own last date, a known real session.
+    // Probing recent *missing* days would probe holidays, which 404.
     let probeOk = false;
+    const probeTargets = store.updated ? [store.updated] : [...missing].reverse().slice(0, 6);
     for (const recent of probeTargets) {
       const day = await fetchBhavday(recent);
       if (day) {
@@ -180,38 +185,41 @@ async function main() {
         probeOk = true;
         break;
       }
-      await sleep(30000);
+      await sleep(15000);
     }
     if (!probeOk) {
-      console.error("NSE CDN is refusing requests (rate-limited or blocked). Try again later.");
+      console.error("NSE CDN refusing requests (rate-limited or blocked). Try again later.");
       process.exit(1);
     }
   }
 
   let added = 0;
-  let consecutiveFails = 0;
+  let consecutiveEmpty = 0;
+  const startedAt = Date.now();
   for (const ymd of missing) {
-    const day = await fetchBhavday(ymd);
-    if (!day) {
-      // Isolated nulls mid-history are holidays; long streaks mean the CDN
-      // started refusing us mid-run.
-      consecutiveFails++;
-      if (consecutiveFails >= 20) {
-        console.error(`20 consecutive failures at ${ymd}; stopping to avoid hammering the CDN.`);
-        break;
-      }
-      if (consecutiveFails % 5 === 0) await sleep(5000 + Math.random() * 2000);
-      continue;
+    // Stop walking once both tapes agree the archive ends: 25 straight empty
+    // days around the window's start means there is nothing deeper to get.
+    if (consecutiveEmpty >= 25 && added > 0) {
+      console.log(`archive floor reached before ${ymd}; stopping walk`);
+      break;
     }
-    consecutiveFails = 0;
+    const nseDay = await fetchBhavday(ymd);
+    await sleep(250 + Math.random() * 200);
+    const bseDay = await fetchBseDay(ymd);
+    await sleep(250 + Math.random() * 200);
+
+    if (!nseDay && !bseDay) {
+      consecutiveEmpty++;
+      continue; // holiday or archive edge on both tapes
+    }
+    consecutiveEmpty = 0;
     const idxBar = await fetchIndexDay(ymd);
-    appendDay(store, ymd, day, idxBar);
+    appendDay(store, ymd, nseDay, bseDay, idxBar);
     added++;
-    if (added % 25 === 0) {
-      console.log(`  ${added} sessions added (through ${ymd})`);
+    if (added % 20 === 0) {
+      console.log(`  ${added} sessions added (through ${ymd}, ${Math.round((Date.now() - startedAt) / 60000)}m)`);
       saveStore(store); // checkpoint so long backfills can resume
     }
-    await sleep(700 + Math.random() * 400);
   }
   console.log(`added ${added} sessions; total ${store.index.length}`);
   store.updated = store.index.length ? store.index[store.index.length - 1][0] : "";
@@ -223,6 +231,26 @@ async function main() {
 
   saveStore(store);
 
+  // ---- Fundamentals refresh (weekly) ----
+  if (!skipFund) {
+    const FUND_FILE = path.join(ROOT, "data", "fundamentals.json");
+    const stale =
+      !fs.existsSync(FUND_FILE) ||
+      Date.now() - fs.statSync(FUND_FILE).mtimeMs > 7 * 86400_000;
+    if (stale) {
+      console.log("fundamentals cache stale; refreshing…");
+      const { spawnSync } = await import("node:child_process");
+      const r = spawnSync("npx", ["tsx", "scripts/fetch-fundamentals.ts"], {
+        stdio: "inherit",
+        cwd: ROOT,
+      });
+      if (r.status !== 0) console.error("fundamentals refresh failed; continuing with cache");
+    } else {
+      console.log("fundamentals cache is fresh");
+    }
+  }
+
+  // ---- Scan ----
   const indexBars: Bar[] = store.index.map(([d, c]) => ({ date: d, open: c, high: c, low: c, close: c, volume: 0 }));
   const barsBySymbol = new Map<string, Bar[]>(
     Object.entries(store.stocks).map(([sym, rows]) => [
@@ -230,18 +258,24 @@ async function main() {
       rows.map(([date, o, h, l, c, v]) => ({ date, open: o, high: h, low: l, close: c, volume: v })),
     ]),
   );
-  const scan = runScan(UNIVERSE, barsBySymbol, indexBars);
-  fs.mkdirSync(path.dirname(SCAN_FILE), { recursive: true });
+  const FUND_FILE = path.join(ROOT, "data", "fundamentals.json");
+  const fundamentals: Record<string, {
+    pe?: number | null; roe?: number | null; profitGrowthTtm?: number | null;
+    name?: string; broadSector?: string; sector?: string; industry?: string; mcapCr?: number;
+  }> = fs.existsSync(FUND_FILE) ? JSON.parse(fs.readFileSync(FUND_FILE, "utf8")) : {};
+  const snapshotNote = UNIVERSE_SNAPSHOT.note;
+  const scan = runScan(UNIVERSE, barsBySymbol, indexBars, fundamentals, snapshotNote);
   fs.writeFileSync(SCAN_FILE, JSON.stringify(scan));
 
   const dist = new Map<number, number>();
-  for (const s of scan.stocks) dist.set(s.score, (dist.get(s.score) ?? 0) + 1);
+  for (const s of scan.rows) dist.set(s.score, (dist.get(s.score) ?? 0) + 1);
   console.log(
     "session", scan.session,
-    "| scored", scan.stocks.length,
-    "| at9", scan.breadth.at9.at(-1),
-    "| mean", scan.breadth.meanScore.at(-1),
-    "| movers", scan.movers.length,
+    "| scored", scan.breadth.universe,
+    "| quar", scan.run.quar,
+    "| at9+", scan.breadth.n9,
+    "| mean", scan.breadth.mean.toFixed(3),
+    "| movers", scan.trans.nUp + scan.trans.nDn,
   );
   console.log("distribution:", [...dist.entries()].sort((a, b) => b[0] - a[0]).map(([k, v]) => `${k}:${v}`).join(" "));
   console.log("scan.json bytes:", fs.statSync(SCAN_FILE).size);

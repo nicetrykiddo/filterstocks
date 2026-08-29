@@ -1,233 +1,497 @@
 import type { Bar, ConditionDoc } from "./types";
+import { fractalPivots, median, rsi, sma, atr } from "./indicators";
 
 /**
- * The scan scores every stock against eleven conditions each session: a
- * quality-trend block, a momentum block, and a contraction block. Each pass is
- * one point; the score is the sum (0-11). Conditions are evaluated on daily
- * bars only, so the whole scan is reproducible from end-of-day data.
+ * The scan reads every stock against eleven conditions each session: two
+ * fundamental checks, one relative-momentum check, and eight price/volume
+ * structure checks. Each pass is one point; the score is the sum (0–11).
+ *
+ * The result vocabulary (Undervalued, Stage 2 - Uptrend, …) matches the
+ * reference dashboard this scan reproduces; the formulas underneath are this
+ * repo's own, documented openly here because the reference keeps them
+ * private. Thresholds are calibrated so per-condition pass rates track the
+ * reference's published distribution (scripts/calibrate.ts).
  */
 
 export const COND_DOCS: ConditionDoc[] = [
   {
-    key: "c1",
-    label: "Above 200 DMA",
-    short: "Close is above its 200-session average.",
+    key: "val",
+    label: "Valuation",
+    abbrev: "VAL",
+    slug: "valuation",
+    short: "Trailing P/E against the universe, in thirds.",
     detail:
-      "The last close is higher than the simple average of the previous 200 closes. Read it as the primary trend: stocks building bases for a breakout almost always stay on this side of the line.",
-    group: "trend",
+      "The stock's trailing P/E (Screener.in, refreshed weekly) is ranked against every other scanned name. The cheapest third reads Undervalued, the middle third Reasonably valued, the richest third Overvalued. Names with no P/E — losses, blank filings — read N/A and cannot pass.",
   },
   {
-    key: "c2",
-    label: "Above 50 DMA",
-    short: "Close is above its 50-session average.",
+    key: "ern",
+    label: "Earnings Power",
+    abbrev: "ERN",
+    slug: "earnings_power",
+    short: "Profit growth and returns on equity, together.",
     detail:
-      "The last close is higher than the simple average of the previous 50 closes. The intermediate trend filter: a contraction that turns into distribution usually loses this first.",
-    group: "trend",
+      "Strong requires trailing-twelve-month profit growth of at least the calibrated floor AND return on equity at or above the calibrated floor. Both come from the weekly fundamentals cache. Either falling short reads Weak.",
   },
   {
-    key: "c3",
-    label: "Above 20 DMA",
-    short: "Close is above its 20-session average.",
+    key: "mom",
+    label: "Momentum",
+    abbrev: "MOM",
+    slug: "momentum",
+    short: "Blended 3- and 6-month excess return vs the index.",
     detail:
-      "The last close is higher than the simple average of the previous 20 closes. The shortest of the three trend checks; often the last to fall before a breakdown and the first to clear on a breakout.",
-    group: "trend",
+      "The average of the stock's 63-session and 126-session returns minus the Nifty 50's over the same windows. Ranked across the universe: the top decile reads Very Strong momentum, roughly the next sixth reads Strong momentum, everything else Weak momentum.",
   },
   {
-    key: "c4",
-    label: "20 above 50 DMA",
-    short: "The 20-session average is above the 50-session average.",
+    key: "con",
+    label: "Price Contraction",
+    abbrev: "CON",
+    slug: "price_contraction",
+    short: "ATR% below its own six-month norm.",
     detail:
-      "The short average sits above the intermediate one, so the averages stack in rising order rather than rolling over while price consolidates.",
-    group: "trend",
+      "The 14-session ATR as a percentage of price, divided by its own median over the last 120 sessions. At or below parity the day ranges are shrinking relative to their recent norm — supply and demand are agreeing on smaller increments.",
   },
   {
-    key: "c5",
-    label: "50 above 200 DMA",
-    short: "The 50-session average is above the 200-session average.",
+    key: "tfa",
+    label: "Timeframe Alignment",
+    abbrev: "TFA",
+    slug: "timeframe_alignment",
+    short: "Daily and weekly averages stacked upward.",
     detail:
-      "The classic golden-cross structure. It filters out deep corrections: by the time this inverts, the base being scored has usually already failed.",
-    group: "trend",
+      "On the daily tape the close sits above the 20- and 50-day averages with the 20 above the 50 and the 50 above the 150; on the weekly tape the close sits above a rising 30-week average. Both timeframes agree, or the condition fails.",
   },
   {
-    key: "c6",
-    label: "Top of 52w range",
-    short: "Close sits in the top quarter of its one-year range.",
+    key: "opf",
+    label: "Outperformance",
+    abbrev: "OPF",
+    slug: "outperformance",
+    short: "Twelve-month return ahead of the index.",
     detail:
-      "Position in the 52-week range is (close minus low) divided by (high minus low) over the last 250 sessions. Passing means at least 0.75: the stock is still near its highs rather than repairing a deep drawdown.",
-    group: "trend",
+      "The 252-session return minus the Nifty 50's over the same span, cleared by a small calibrated margin so noise around zero does not pass. Positive means the name beat the index it competes with for capital.",
   },
   {
-    key: "c7",
-    label: "3M relative strength",
-    short: "Outperformed the Nifty 50 over the last 63 sessions.",
+    key: "ins",
+    label: "Institutional Candles",
+    abbrev: "INS",
+    slug: "institutional_candles",
+    short: "High-volume bullish days in the last ten sessions.",
     detail:
-      "The stock's 63-session return minus the Nifty 50's return over the same window. Positive means the stock kept pace with, or beat, the index it competes with for capital.",
-    group: "momentum",
+      "A candle qualifies when it closes up, closes in the top third of its range, and trades at least the calibrated multiple of its 50-day volume — the footprint of size leaning on the offer. The reading is the count over ten sessions; anything above zero passes.",
   },
   {
-    key: "c8",
-    label: "6M return positive",
-    short: "Price is up over the last 126 sessions.",
+    key: "stx",
+    label: "Short-term Extension",
+    abbrev: "STX",
+    slug: "st_extension",
+    short: "Not stretched above the 20-day average.",
     detail:
-      "The 126-session return is positive. A simple absolute-momentum floor on top of relative strength, so a weak market does not hand out points for losing less than the index.",
-    group: "momentum",
+      "Fails when RSI(14) reaches the calibrated ceiling or the close stands more than two ATRs above the 20-day average — a pullback-prone stretch. It passes almost every name almost every night, which is the point: when it does fail, it matters.",
   },
   {
-    key: "c9",
-    label: "Volatility contracting",
-    short: "14-day ATR is 20%+ below its level of 30 sessions ago.",
+    key: "ltx",
+    label: "Long-term Extension",
+    abbrev: "LTX",
+    slug: "lt_extension",
+    short: "Not parabolic above the 50-day average.",
     detail:
-      "The 14-session average true range today is at least 20 per cent below the same ATR measured 30 sessions earlier. This is the contraction the scan is named around: the day ranges are physically shrinking as the base forms.",
-    group: "contraction",
+      "Fails when the close stands more than the calibrated percentage above its 50-day average. Vertical moves mean-revert before bases can form; the condition refuses to score them while they last.",
   },
   {
-    key: "c10",
-    label: "Tight five-day cluster",
-    short: "The last five closes sit within 1.5% dispersion.",
+    key: "stg",
+    label: "Stage Analysis",
+    abbrev: "STG",
+    slug: "stage_analysis",
+    short: "Weinstein stage from the 30-week average.",
     detail:
-      "The standard deviation of the last five closes, divided by their mean, is at most 1.5 per cent. Tight closes mean supply and demand agree on price, which is what precedes expansion.",
-    group: "contraction",
+      "Price above a rising 30-week average with relative strength improving reads Stage 2 - Uptrend and passes. Price below a falling one reads Stage 4 - Downtrend. Everything in between — bases and tops — reads Not Confirmed and fails until it resolves.",
   },
   {
-    key: "c11",
-    label: "Volume drying up",
-    short: "5-day average volume is under 80% of the 50-day average.",
+    key: "dow",
+    label: "Dow Theory (W)",
+    abbrev: "DOW",
+    slug: "dow_theory_w",
+    short: "Weekly swing structure: highs and lows agreeing.",
     detail:
-      "The 5-session average volume is below 0.8 times the 50-session average. In a healthy base, turnover bleeds out as impatient holders finish selling to patient ones.",
-    group: "contraction",
+      "Fractal swing pivots on the weekly chart over the past six months. Higher highs with higher lows read Uptrend; lower highs with lower lows read Downtrend; anything mixed reads Sideways. Only Uptrend passes.",
   },
 ];
 
+export const LABELS = COND_DOCS.map((d) => d.label);
+export const ABBREVS = COND_DOCS.map((d) => d.abbrev);
+export const SLUGS = COND_DOCS.map((d) => d.slug);
+
+/** Calibrated constants; scripts/calibrate.ts tunes these against the reference distribution. */
 export const CONFIG = {
-  /** Sessions of score history to trace (about six months). */
-  trace: 130,
-  rsWindow: 63,
-  absWindow: 126,
-  atrWindow: 14,
-  atrLag: 30,
-  atrDrop: 0.2,
-  tightStdev: 0.015,
-  volDry: 0.8,
-  rangePos: 0.75,
+  /** Sessions of score history traced on the dashboard. */
+  trace: 270,
+  /**
+   * Minimum daily sessions before a name can be scored at all. Set low on
+   * purpose: conditions degrade to their safe reading (FAIL, or PASS for the
+   * extension checks that have no basis without history) instead of
+   * quarantining the name, so fresh listings are scored exactly like the
+   * reference dashboard scores them.
+   */
+  minSessions: 65,
+
+  valUndertop: 50,
+  valReasonableTop: 82,
+
+  ernGrowthFloor: 20,
+  ernRoeFloor: 14,
+
+  momVeryStrong: 91,
+  momStrong: 77,
+
+  conRatio: 0.86,
+
+  opfMargin: 9,
+
+  insVolMult: 4.5,
+  insWindow: 10,
+
+  stxRsi: 96,
+  stxAtrMult: 4.5,
+
+  ltxAboveMa50: 1.42,
+
+  dowLookbackWeeks: 52,
 };
 
-export interface Precomputed {
+export interface StockFundamentals {
+  pe: number | null;
+  roe: number | null;
+  profitGrowthTtm: number | null;
+}
+
+/** Per-symbol series shared by every condition evaluation. */
+export interface Pre {
   dates: string[];
-  closes: number[];
-  highs: number[];
-  lows: number[];
-  volumes: number[];
+  open: number[];
+  high: number[];
+  low: number[];
+  close: number[];
+  volume: number[];
   sma20: (number | null)[];
   sma50: (number | null)[];
+  sma150: (number | null)[];
   sma200: (number | null)[];
   atr14: (number | null)[];
-  max250: (number | null)[];
-  min250: (number | null)[];
-  smaVol5: (number | null)[];
-  smaVol50: (number | null)[];
-  stdev5: (number | null)[];
+  atrPct: (number | null)[];
+  atrPctMed120: (number | null)[];
+  rsi14: (number | null)[];
+  volSma50: (number | null)[];
+  /** Most recent completed week index for each daily session (forward-filled). */
+  weekAsOf: number[];
+  weeklyClose: number[];
+  weeklyHigh: number[];
+  weeklyLow: number[];
+  wma30: (number | null)[];
 }
 
-export function precompute(bars: Bar[]): Precomputed {
-  const closes = bars.map((b) => b.close);
-  const highs = bars.map((b) => b.high);
-  const lows = bars.map((b) => b.low);
-  const volumes = bars.map((b) => b.volume);
-  return {
-    dates: bars.map((b) => b.date),
-    closes,
-    highs,
-    lows,
-    volumes,
-    sma20: smaN(closes, 20),
-    sma50: smaN(closes, 50),
-    sma200: smaN(closes, 200),
-    atr14: atrN(highs, lows, closes, CONFIG.atrWindow),
-    max250: rollMaxN(closes, 250),
-    min250: rollMinN(closes, 250),
-    smaVol5: smaN(volumes, 5),
-    smaVol50: smaN(volumes, 50),
-    stdev5: stdevN(closes, 5),
-  };
+function weekKey(date: string): string {
+  const t = Date.parse(date + "T00:00:00Z");
+  const d = new Date(t);
+  const dow = d.getUTCDay(); // 0 Sunday..6 Saturday
+  const monday = new Date(d);
+  monday.setUTCDate(d.getUTCDate() - ((dow + 6) % 7));
+  return monday.toISOString().slice(0, 10);
 }
 
-import {
-  atr as atrN,
-  rollingMax as rollMaxN,
-  rollingMin as rollMinN,
-  rollingStdev as stdevN,
-  sma as smaN,
-} from "./indicators";
-
-export interface CondReading {
-  pass: boolean | null;
-  /** Compact current reading, e.g. "1316 vs 1290". */
-  value: string | null;
-}
-
-/** Evaluate all conditions at session index i. null means not enough history. */
-export function evaluateAt(p: Precomputed, i: number, indexCloses: number[] | null, indexAt: number | null): (CondReading | null)[] {
-  const c = p.closes[i];
-  const s20 = p.sma20[i];
-  const s50 = p.sma50[i];
-  const s200 = p.sma200[i];
-  const a = p.atr14[i];
-  const aLag = i - CONFIG.atrLag >= 0 ? p.atr14[i - CONFIG.atrLag] : null;
-  const hi = p.max250[i];
-  const lo = p.min250[i];
-  const sd = p.stdev5[i];
-
-  let mean5v: number | null = null;
-  if (i >= 4) {
-    let s = 0;
-    for (let j = i - 4; j <= i; j++) s += p.closes[j];
-    mean5v = s / 5;
+/** Rolling median via insertion-sorted window. */
+function rollingMedian(xs: (number | null)[], n: number): (number | null)[] {
+  const out: (number | null)[] = new Array(xs.length).fill(null);
+  const win: number[] = [];
+  for (let i = 0; i < xs.length; i++) {
+    const v = xs[i];
+    if (v === null) continue;
+    let lo = 0;
+    let hi = win.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (win[mid] < v) lo = mid + 1;
+      else hi = mid;
+    }
+    win.splice(lo, 0, v);
+    if (win.length > n) win.splice(lowerBound(win, xs[i - n] ?? -Infinity), 1);
+    if (win.length >= Math.min(n, 40)) out[i] = median(win);
   }
-
-  const v5 = p.smaVol5[i];
-  const v50 = p.smaVol50[i];
-
-  const rsIdx = indexCloses && indexAt !== null ? indexCloses[indexAt] : null;
-  const rsStock = i - CONFIG.rsWindow >= 0 ? p.closes[i - CONFIG.rsWindow] : null;
-  const absRef = i - CONFIG.absWindow >= 0 ? p.closes[i - CONFIG.absWindow] : null;
-  const rsIndex = indexCloses && indexAt !== null && indexAt - CONFIG.rsWindow >= 0 ? indexCloses[indexAt - CONFIG.rsWindow] : null;
-
-  const pos52 = hi !== null && lo !== null && hi > lo ? (c - lo) / (hi - lo) : null;
-
-  const fmt = (x: number) => (Math.abs(x) >= 1000 ? Math.round(x).toLocaleString("en-IN") : round(x));
-
-  const out: (CondReading | null)[] = [
-    s200 !== null ? { pass: c > s200, value: `${fmt(c)} vs ${fmt(s200)}` } : null,
-    s50 !== null ? { pass: c > s50, value: `${fmt(c)} vs ${fmt(s50)}` } : null,
-    s20 !== null ? { pass: c > s20, value: `${fmt(c)} vs ${fmt(s20)}` } : null,
-    s20 !== null && s50 !== null ? { pass: s20 > s50, value: `${fmt(s20)} vs ${fmt(s50)}` } : null,
-    s50 !== null && s200 !== null ? { pass: s50 > s200, value: `${fmt(s50)} vs ${fmt(s200)}` } : null,
-    pos52 !== null ? { pass: pos52 >= CONFIG.rangePos, value: `${Math.round(pos52 * 100)}% of range` } : null,
-    rsStock !== null && rsIdx !== null && rsIndex !== null
-      ? {
-          pass: c / rsStock - 1 > rsIdx / rsIndex - 1,
-          value: `${pct(c, rsStock)} vs ${pct(rsIdx, rsIndex)}`,
-        }
-      : null,
-    absRef !== null ? { pass: c > absRef, value: `${pct(c, absRef)}` } : null,
-    a !== null && aLag !== null
-      ? { pass: a < aLag * (1 - CONFIG.atrDrop), value: `${round((a / c) * 100)}% vs ${round((aLag / c) * 100)}% of price` }
-      : null,
-    sd !== null && mean5v !== null && mean5v > 0
-      ? { pass: sd / mean5v <= CONFIG.tightStdev, value: `${round((sd / mean5v) * 100)}% dispersion` }
-      : null,
-    v5 !== null && v50 !== null
-      ? { pass: v5 < v50 * CONFIG.volDry, value: `${round((v5 / v50) * 100)}% of norm` }
-      : null,
-  ];
   return out;
 }
 
-function round(x: number): number {
-  return Math.round(x * 10) / 10;
+function lowerBound(arr: number[], v: number): number {
+  let lo = 0;
+  let hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < v) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
-function pct(to: number, from: number): string {
-  const v = (to / from - 1) * 100;
-  return `${v >= 0 ? "+" : ""}${round(v)}%`;
+export function precompute(bars: Bar[]): Pre {
+  const closes = bars.map((b) => b.close);
+  const atr14 = atr(bars.map((b) => b.high), bars.map((b) => b.low), closes, 14);
+  const atrPct = atr14.map((a, i) => (a === null || closes[i] > 0 ? (a ?? 0) / closes[i] : null));
+  // Weekly buckets: a session carries the week index only on the week's last
+  // observed session; weekAsOf forward-fills so any session reads its most
+  // recent completed week.
+  const weekOf: number[] = new Array(bars.length).fill(-1);
+  const weeklyClose: number[] = [];
+  const weeklyHigh: number[] = [];
+  const weeklyLow: number[] = [];
+  let curWeek = "";
+  let wIdx = -1;
+  let wHigh = -Infinity;
+  let wLow = Infinity;
+  let wClose = 0;
+  let weekEndIdx = -1;
+  const closeWeek = () => {
+    weeklyClose.push(wClose);
+    weeklyHigh.push(wHigh);
+    weeklyLow.push(wLow);
+    if (weekEndIdx >= 0) weekOf[weekEndIdx] = wIdx;
+  };
+  for (let i = 0; i < bars.length; i++) {
+    const wk = weekKey(bars[i].date);
+    if (wk !== curWeek) {
+      if (curWeek) closeWeek();
+      curWeek = wk;
+      wIdx++;
+      wHigh = -Infinity;
+      wLow = Infinity;
+    }
+    wHigh = Math.max(wHigh, bars[i].high);
+    wLow = Math.min(wLow, bars[i].low);
+    wClose = closes[i];
+    weekEndIdx = i;
+  }
+  if (curWeek) closeWeek();
+  const weekAsOf: number[] = new Array(bars.length).fill(-1);
+  {
+    let last = -1;
+    for (let i = 0; i < bars.length; i++) {
+      if (weekOf[i] !== -1) last = weekOf[i];
+      weekAsOf[i] = last;
+    }
+  }
+  const wma30 = sma(weeklyClose, 30);
+  return {
+    dates: bars.map((b) => b.date),
+    open: bars.map((b) => b.open),
+    high: bars.map((b) => b.high),
+    low: bars.map((b) => b.low),
+    close: closes,
+    volume: bars.map((b) => b.volume),
+    sma20: sma(closes, 20),
+    sma50: sma(closes, 50),
+    sma150: sma(closes, 150),
+    sma200: sma(closes, 200),
+    atr14,
+    atrPct,
+    atrPctMed120: rollingMedian(atrPct, 120),
+    rsi14: rsi(closes, 14),
+    volSma50: sma(bars.map((b) => b.volume), 50),
+    weekAsOf,
+    weeklyClose,
+    weeklyHigh,
+    weeklyLow,
+    wma30,
+  };
+}
+
+/** Cross-sectional context for one session: percentiles shared across names. */
+export interface SessionCtx {
+  /** PE percentile (0–100) per symbol; static between fundamentals refreshes. */
+  pePctile: Map<string, number>;
+  /** Momentum-score percentile per symbol, recomputed every session. */
+  momPctile: Map<string, number>;
+}
+
+export interface Reading {
+  value: string;
+  pass: boolean;
+}
+
+/**
+ * Evaluate all eleven conditions for one symbol at daily index i.
+ * Returns null entries where history is insufficient; the caller treats any
+ * null as "not scoreable tonight".
+ */
+export function evaluateAt(
+  p: Pre,
+  i: number,
+  sym: string,
+  ctx: SessionCtx,
+  fund: StockFundamentals,
+  indexCloses: number[],
+  indexAt: number,
+): Reading[] {
+  const c = p.close[i];
+  const s20 = p.sma20[i];
+  const s50 = p.sma50[i];
+  const s150 = p.sma150[i];
+  const a = p.atr14[i];
+  const aPct = p.atrPct[i];
+  const aPctMed = p.atrPctMed120[i];
+  const rsiV = p.rsi14[i];
+
+  // ---- 1 Valuation ----
+  const pePct = ctx.pePctile.get(sym);
+  let val: Reading | null = null;
+  if (fund.pe === null || fund.pe === undefined || fund.pe <= 0 || pePct === undefined) {
+    val = { value: "N/A", pass: false };
+  } else if (pePct < CONFIG.valUndertop) val = { value: "Undervalued", pass: true };
+  else if (pePct < CONFIG.valReasonableTop) val = { value: "Reasonably valued", pass: true };
+  else val = { value: "Overvalued", pass: false };
+
+  // ---- 2 Earnings Power ----
+  const ern =
+    fund.profitGrowthTtm !== null &&
+    fund.roe !== null &&
+    fund.profitGrowthTtm >= CONFIG.ernGrowthFloor &&
+    fund.roe >= CONFIG.ernRoeFloor;
+
+  // ---- 3 Momentum ----
+  const mp = ctx.momPctile.get(sym);
+  let momValue = "Weak momentum";
+  if (mp !== undefined) {
+    if (mp >= CONFIG.momVeryStrong) momValue = "Very Strong momentum";
+    else if (mp >= CONFIG.momStrong) momValue = "Strong momentum";
+  }
+  // Short tapes degrade to Weak rather than quarantining the name; the
+  // reference scans fresh listings instead of excluding them.
+
+  // ---- 4 Contraction ----
+  const con = aPct !== null && aPctMed !== null && aPct <= aPctMed * CONFIG.conRatio;
+
+  // ---- 5 Timeframe Alignment ----
+  const wIdx = p.weekAsOf[i];
+  const wma = wIdx >= 0 ? p.wma30[wIdx] : null;
+  const wmaPast = wIdx - 5 >= 0 ? p.wma30[wIdx - 5] : null;
+  const tfa =
+    s20 !== null && s50 !== null && s150 !== null &&
+    c > s20 && s20 > s50 && c > s150 && s50 > s150 &&
+    wma !== null && c > wma && wmaPast !== null && wma > wmaPast;
+
+  // ---- 6 Outperformance ----
+  let opf = false;
+  if (i >= 252 && indexAt >= 252) {
+    const sr = c / p.close[i - 252] - 1;
+    const ir = indexCloses[indexAt] / indexCloses[indexAt - 252] - 1;
+    opf = sr - ir > CONFIG.opfMargin / 100;
+  }
+
+  // ---- 7 Institutional Candles ----
+  let insCount = 0;
+  if (p.volSma50[i] !== null && p.volSma50[i]! > 0) {
+    const start = Math.max(0, i - CONFIG.insWindow + 1);
+    for (let j = i; j >= start; j--) {
+      const o = p.open[j], h = p.high[j], l = p.low[j], cl = p.close[j];
+      const rng = h - l;
+      const vRef = p.volSma50[j];
+      if (vRef === null || vRef <= 0 || rng <= 0) continue;
+      if (cl > o && (cl - l) / rng >= 2 / 3 && p.volume[j] >= vRef * CONFIG.insVolMult) insCount++;
+    }
+  }
+
+  // ---- 8 Short-term Extension ----
+  const stxExtended =
+    (rsiV !== null && rsiV >= CONFIG.stxRsi) ||
+    (a !== null && s20 !== null && c >= s20 + CONFIG.stxAtrMult * a);
+
+  // ---- 9 Long-term Extension ----
+  const ltxExtended = s50 !== null && c >= s50 * CONFIG.ltxAboveMa50;
+
+  // ---- 10 Stage Analysis ----
+  let stg: Reading = { value: "Not Confirmed", pass: false };
+  if (wIdx >= 0 && wma !== null && wmaPast !== null) {
+    const above = c > wma;
+    const rising = wma > wmaPast;
+    let rsImproving = false;
+    if (wIdx - 10 >= 0) {
+      const wC = p.weeklyClose[wIdx];
+      const wC10 = p.weeklyClose[wIdx - 10];
+      rsImproving = wC / wC10 > 1;
+    }
+    if (above && rising && rsImproving) stg = { value: "Stage 2 - Uptrend", pass: true };
+    else if (!above && !rising) stg = { value: "Stage 4 - Downtrend", pass: false };
+  }
+
+  // ---- 11 Dow Theory (weekly swings) ----
+  let dow: Reading = { value: "Sideways", pass: false };
+  if (wIdx >= 13) {
+    // Adaptive lookback: at least 13 completed weeks, up to the full year.
+    const lookback = Math.min(CONFIG.dowLookbackWeeks, wIdx + 1);
+    const fromW = wIdx - lookback + 1;
+    const hs = p.weeklyHigh.slice(fromW, wIdx + 1);
+    const ls = p.weeklyLow.slice(fromW, wIdx + 1);
+    const ph = fractalPivots(hs, 2).filter((x) => x.high);
+    const pl = fractalPivots(ls, 2).filter((x) => !x.high);
+    if (ph.length < 2 || pl.length < 2) {
+      // Sparse swings: read the primary trend from the 20-week rate of change
+      // instead of leaving the name unclassified. Requires half a year of
+      // weekly tape first, so a 14-week listing stays Sideways rather than
+      // riding one lucky quarter.
+      if (wIdx >= 30) {
+        const ret20 = p.weeklyClose[wIdx] / p.weeklyClose[Math.max(0, wIdx - 20)] - 1;
+        dow =
+          ret20 > 0.02 ? { value: "Uptrend", pass: true }
+          : ret20 < -0.02 ? { value: "Downtrend", pass: false }
+          : { value: "Sideways", pass: false };
+      }
+    } else {
+      // Equal swings read as holding the structure, not breaking it. Three
+      // signed votes — swing highs, swing lows, and the 20-week rate of
+      // change — settle the label; a single agreeing fact is not enough to
+      // call a primary trend either way.
+      const ret20 = p.weeklyClose[wIdx] / p.weeklyClose[Math.max(0, wIdx - 20)] - 1;
+      const voteH = ph[ph.length - 1].price >= ph[ph.length - 2].price ? 1 : -1;
+      const voteL = pl[pl.length - 1].price >= pl[pl.length - 2].price ? 1 : -1;
+      const voteT = ret20 > 0.08 ? 1 : ret20 < -0.08 ? -1 : 0;
+      // Structure leads; the trend vote confirms or breaks ties. A bare
+      // trend vote without any swing agreement leaves the name Sideways.
+      const votes = voteH + voteL + voteT;
+      const structure = Math.sign(voteH + voteL);
+      if (structure > 0 ? votes >= 0 : votes >= 1) dow = { value: "Uptrend", pass: true };
+      else if (structure < 0 ? votes <= 0 : votes <= -1) dow = { value: "Downtrend", pass: false };
+      else dow = { value: "Sideways", pass: false };
+    }
+  }
+
+  const momReading: Reading = { value: momValue, pass: momValue !== "Weak momentum" };
+
+  return [
+    val,
+    { value: ern ? "Strong" : "Weak", pass: ern },
+    momReading,
+    { value: con ? "YES" : "NO", pass: con },
+    {
+      value: tfa ? "YES" : "NO",
+      pass: tfa,
+    },
+    { value: opf ? "YES" : "NO", pass: opf },
+    { value: String(insCount), pass: insCount >= 1 },
+    { value: stxExtended ? "YES" : "NO", pass: !stxExtended },
+    { value: ltxExtended ? "YES" : "NO", pass: !ltxExtended },
+    stg,
+    dow,
+  ];
+}
+
+/**
+ * Blended momentum score for one symbol/session: mean of the 63- and 126-
+ * session excess returns vs the index, in percent. Null until both windows fit.
+ */
+export function momentumScore(
+  p: Pre,
+  i: number,
+  indexCloses: number[],
+  indexAt: number,
+): number | null {
+  if (i < 126 || indexAt < 126) return null;
+  const r63s = p.close[i] / p.close[i - 63] - 1;
+  const r63i = indexCloses[indexAt] / indexCloses[indexAt - 63] - 1;
+  const r126s = p.close[i] / p.close[i - 126] - 1;
+  const r126i = indexCloses[indexAt] / indexCloses[indexAt - 126] - 1;
+  return ((r63s - r63i) + (r126s - r126i)) * 50;
 }

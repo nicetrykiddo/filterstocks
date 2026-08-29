@@ -1,18 +1,31 @@
 "use client";
 
-import { useEffect } from "react";
-import { ArrowSquareOut, X } from "@phosphor-icons/react";
-import { fmtPct, fmtPrice, fmtVolume } from "@/lib/format";
+import { useEffect, useState } from "react";
 import type { ScanResult, StockRow } from "@/lib/types";
-import { CondStrip } from "./CondStrip";
-import { Sparkline } from "./charts";
-import { BandChip, DeltaText } from "./ui";
 
-/**
- * Full reading for one name: every condition with its current measurement,
- * plus score and price traces. Desktop gets a right sheet, mobile a bottom
- * sheet.
- */
+function Spark({ r }: { r: StockRow }) {
+  const W = 500;
+  const HT = 120;
+  const PAD = 8;
+  const h = r.hist;
+  const lo = Math.min(...h);
+  const hi = Math.max(...h);
+  const span = hi - lo || 1;
+  // The dashed line is the 9-of-11 threshold; draw it only when in range.
+  const Y = (v: number) => HT - 6 - ((v - lo) / span) * (HT - 12);
+  const X = (i: number) => PAD + (i * (W - PAD * 2)) / Math.max(1, h.length - 1);
+  const path = h.map((v, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join("");
+  return (
+    <svg viewBox={`0 0 ${W} ${HT}`} style={{ width: "100%", display: "block" }} role="img" aria-label="Score history">
+      {9 >= lo && 9 <= hi ? (
+        <line x1={PAD} x2={W - PAD} y1={Y(9)} y2={Y(9)} stroke="var(--text-secondary)" strokeWidth="1" strokeDasharray="4 4" opacity="0.7" />
+      ) : null}
+      <path d={path} fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinejoin="round" />
+      <circle cx={X(h.length - 1)} cy={Y(h[h.length - 1])} r="3.5" fill="var(--mark)" />
+    </svg>
+  );
+}
+
 export function StockDrawer({
   stock,
   scan,
@@ -26,153 +39,140 @@ export function StockDrawer({
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
-    window.addEventListener("keydown", onKey);
-    document.body.style.overflow = "hidden";
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      document.body.style.overflow = "";
-    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  const groups = ["trend", "momentum", "contraction"] as const;
-  const groupLabels = { trend: "Trend", momentum: "Momentum", contraction: "Contraction" } as const;
+  const d = stock.prev === null ? null : stock.score - stock.prev;
+  const meta = [stock.sector, stock.band, ...stock.idx].filter(Boolean).join(" · ");
 
   return (
-    <div
-      className="fixed inset-0 z-40 bg-ink/25 backdrop-blur-[1px]"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-      aria-label={`${stock.symbol} reading`}
-    >
-      <div
-        className="sheet absolute inset-x-0 bottom-0 flex max-h-[92vh] flex-col rounded-t-[10px] border border-rule bg-surface sm:inset-y-0 sm:left-auto sm:right-0 sm:max-h-none sm:w-[440px] sm:rounded-none sm:border-l"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-start justify-between gap-3 border-b border-rule px-5 py-4">
-          <div className="min-w-0">
-            <div className="flex items-baseline gap-2">
-              <h2 className="num truncate text-[17px] font-bold tracking-tight">{stock.symbol}</h2>
-              <BandChip band={stock.band} />
-            </div>
-            <p className="mt-0.5 truncate text-[12px] text-ink2">
-              {stock.name} · {stock.sector}
-              {stock.fno ? ", F&O" : ""}
-            </p>
+    <>
+      <div className="scrim on" onClick={onClose} />
+      <aside className="drw on" aria-label={`Stock detail: ${stock.symbol}`}>
+        <div className="drwh">
+          <div>
+            <h2>{stock.symbol}</h2>
+            <div className="m">{meta}</div>
+            <div className="m">{stock.name}</div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            autoFocus
-            className="cursor-pointer rounded-[4px] p-1.5 text-ink2 transition-colors hover:bg-raise hover:text-ink"
-          >
-            <X size={18} aria-hidden />
+          <button className="x" aria-label="Close" onClick={onClose}>
+            ✕
           </button>
         </div>
-
-        <div className="overflow-y-auto px-5 py-4">
-          <div className="flex items-end justify-between gap-4">
-            <div>
-              <p className="text-[10.5px] font-medium uppercase tracking-[0.14em] text-ink3">At</p>
-              <p className="num text-[28px] font-semibold leading-none tracking-tight">
-                {stock.score}
-                <span className="text-[15px] font-normal text-ink3"> of 11</span>
-              </p>
-              <p className="mt-1 flex items-center gap-2 text-[12px] text-ink2">
-                <DeltaText v={stock.delta} /> vs yesterday · held {stock.held}{" "}
-                {stock.held === 1 ? "session" : "sessions"}
-              </p>
+        <div className="dstat">
+          <div>
+            <span className="eyebrow">Score</span>
+            <div className="v">
+              {stock.score}
+              <s>/11</s>
             </div>
-            <CondStrip conds={stock.conds} size="lg" />
+            <div className="d">
+              {d === null
+                ? "no prior session"
+                : d === 0
+                  ? `unchanged vs ${scan.prevSession ?? ""}`
+                  : `${d > 0 ? "+" : "\u2212"}${Math.abs(d)} vs ${scan.prevSession ?? ""}`}
+            </div>
           </div>
-
-          <dl className="mt-5 grid grid-cols-2 gap-x-4 gap-y-2.5 border-y border-rule py-3.5 text-[12.5px] sm:grid-cols-4">
-            <div>
-              <dt className="text-[10.5px] uppercase tracking-[0.12em] text-ink3">Close</dt>
-              <dd className="num mt-0.5 font-medium">₹{fmtPrice(stock.close)}</dd>
-            </div>
-            <div>
-              <dt className="text-[10.5px] uppercase tracking-[0.12em] text-ink3">Day chg</dt>
-              <dd className={`num mt-0.5 font-medium ${stock.chgPct >= 0 ? "text-up" : "text-down"}`}>
-                {fmtPct(stock.chgPct)}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[10.5px] uppercase tracking-[0.12em] text-ink3">vs 20 DMA</dt>
-              <dd className={`num mt-0.5 font-medium ${stock.vs20Dma >= 0 ? "text-up" : "text-down"}`}>
-                {fmtPct(stock.vs20Dma)}
-              </dd>
-            </div>
-            <div>
-              <dt className="text-[10.5px] uppercase tracking-[0.12em] text-ink3">Volume</dt>
-              <dd className="num mt-0.5 font-medium">{fmtVolume(stock.volume)}</dd>
-            </div>
-          </dl>
-
-          <div className="mt-5 grid grid-cols-2 gap-5">
-            <figure>
-              <figcaption className="mb-1 text-[10.5px] font-medium uppercase tracking-[0.14em] text-ink3">
-                Score, 6 months
-              </figcaption>
-              <Sparkline values={stock.scoreHist} width={170} height={38} />
-            </figure>
-            <figure>
-              <figcaption className="mb-1 text-[10.5px] font-medium uppercase tracking-[0.14em] text-ink3">
-                Close, 6 months
-              </figcaption>
-              <Sparkline values={stock.closeHist} width={170} height={38} />
-            </figure>
+          <div>
+            <span className="eyebrow">Held</span>
+            <div className="v">{stock.held}</div>
+            <div className="d">session{stock.held === 1 ? "" : "s"} at this score</div>
           </div>
-
-          <div className="mt-6 space-y-5">
-            {groups.map((g) => (
-              <div key={g}>
-                <h3 className="mb-2 text-[11px] font-medium uppercase tracking-[0.14em] text-ink3">
-                  {groupLabels[g]}
-                </h3>
-                <ul>
-                  {scan.conditions.map((doc, i) =>
-                    doc.group !== g ? null : (
-                      <li key={doc.key} className="flex items-start gap-3 border-b border-rule py-2 last:border-b-0">
-                        <span
-                          aria-hidden
-                          className={`mt-[3px] h-2.5 w-2.5 shrink-0 rounded-[2px] border ${
-                            stock.conds[i] ? "border-ink/40 bg-ink/70" : "border-rule bg-transparent"
-                          }`}
-                        />
-                        <div className="min-w-0">
-                          <p className="text-[12.5px] font-medium text-ink">
-                            {i + 1}. {doc.label}
-                            {stock.condValues[i] ? (
-                              <span className="num ml-2 font-normal text-ink2">{stock.condValues[i]}</span>
-                            ) : null}
-                          </p>
-                          <p className="mt-0.5 text-[11.5px] leading-relaxed text-ink3">{doc.short}</p>
-                        </div>
-                        <span className={`num ml-auto shrink-0 text-[11px] font-semibold ${stock.conds[i] ? "text-up" : "text-ink3"}`}>
-                          {stock.conds[i] ? "PASS" : "FAIL"}
-                        </span>
-                      </li>
-                    ),
-                  )}
-                </ul>
+          <div>
+            <span className="eyebrow">Close</span>
+            <div className="v">{stock.close.toLocaleString("en-IN")}</div>
+            <div className="d" style={{ color: stock.chgPct > 0 ? "var(--pos)" : stock.chgPct < 0 ? "var(--neg)" : "var(--muted)" }}>
+              {stock.chgPct > 0 ? "+" : ""}
+              {stock.chgPct.toFixed(2)}%
+            </div>
+          </div>
+        </div>
+        <div className="dsec">
+          <span className="eyebrow">Score, last {stock.hist.length} sessions</span>
+          <p className="cap" style={{ margin: "0 0 var(--sp-3)" }}>
+            The dashed line is the 9-of-11 threshold.
+          </p>
+          <Spark r={stock} />
+        </div>
+        <div className="dsec">
+          <span className="eyebrow">Tonight{"\u2019"}s eleven conditions</span>
+          <div style={{ marginTop: "var(--sp-3)" }}>
+            {scan.labels.map((l, i) => (
+              <div key={i} className="crow">
+                <div className="i">{i + 1}</div>
+                <div className="nm">
+                  {l}
+                  <b>{stock.res[i] ?? ""}</b>
+                </div>
+                <div className={`st ${stock.st[i] === "1" ? "p" : "f"}`}>{stock.st[i] === "1" ? "PASS" : "FAIL"}</div>
               </div>
             ))}
           </div>
         </div>
+        <div className="dsec">
+          <span className="eyebrow">Chart</span>
+          <div style={{ marginTop: "var(--sp-3)" }}>
+            <a
+              className="tvb"
+              target="_blank"
+              rel="noopener noreferrer"
+              href={`https://www.tradingview.com/chart/?symbol=${encodeURIComponent(stock.tvSymbol)}`}
+            >
+              Open {stock.tvSymbol} on TradingView ↗
+            </a>
+          </div>
+          <div className="cap">Scores are computed from end-of-day data; the intraday chart is external.</div>
+        </div>
+      </aside>
+    </>
+  );
+}
 
-        <div className="border-t border-rule px-5 py-3">
-          <a
-            href={`https://www.tradingview.com/chart/?symbol=NSE:${encodeURIComponent(stock.symbol)}`}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1.5 rounded-[4px] border border-rule px-3 py-1.5 text-[12.5px] font-medium text-ink transition-colors hover:border-ink3"
-          >
-            Open chart in TradingView <ArrowSquareOut size={13} aria-hidden />
-          </a>
+export function GuideModal({ scan, onClose }: { scan: ScanResult; onClose: () => void }) {
+  const [mounted] = useState(true);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  if (!mounted) return null;
+  return (
+    <>
+      <div className="guide-scrim on" onClick={onClose} />
+      <div className="guide on" role="dialog" aria-modal="true" aria-label="How to read this dashboard">
+        <div className="guide-box" onClick={(e) => e.stopPropagation()}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 12, marginBottom: 8 }}>
+            <h2>How to read this dashboard</h2>
+            <button className="x" aria-label="Close" onClick={onClose} style={{ marginLeft: "auto" }}>
+              ✕
+            </button>
+          </div>
+          <p className="readline">
+            Each session every scanned name is read against eleven conditions — two fundamental, one relative, eight of
+            price and volume structure. One pass is one point; a stock&rsquo;s score is how many of the eleven it clears
+            tonight. Nine or more marks the strongest tape. Every formula below runs on public end-of-day data and is
+            documented exactly as implemented.
+          </p>
+          {scan.conditions.map((c, i) => (
+            <div key={c.key} className="gcond">
+              <div className="gi">
+                {i + 1}.
+              </div>
+              <div>
+                <span className="gn">
+                  {c.label} ({c.abbrev}) —{" "}
+                  <span style={{ color: "var(--text-secondary)", fontWeight: 400 }}>{c.short}</span>
+                </span>
+                <p className="gd">{c.detail}</p>
+              </div>
+            </div>
+          ))}
         </div>
       </div>
-    </div>
+    </>
   );
 }
