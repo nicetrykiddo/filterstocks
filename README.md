@@ -56,6 +56,33 @@ npm run dev                     # dashboard at localhost:3000
   for reference
 - `src/components/` - the dashboard
 
+## Formula recovery (research)
+
+RPCI's formulas are private, but the published bits are labels. With the
+bhavcopy store and the screener-backed fundamentals cache,
+`scripts/recover.ts` grid-searches hypothesis families against the
+published PASS/FAIL bits and `scripts/validate.ts` simulates candidates
+across 120 sessions of published score history. Findings:
+
+- **STX** — pass = NOT (RSI14 ≥ 87 OR close ≥ MA20 + 5.5×ATR14): 100% match
+- **LTX** — pass = NOT (close ≥ 1.30×MA50): 99%
+- **INS** — ≥1 candle in last 10-20 sessions closing up, in the top ⅔ of
+  its range, on ≥10× 50-day-average volume: 93%
+- **STG** — close above a rising 30-week MA (Weinstein): 85%, half of
+  mismatches within 2% of the boundary (data-basis noise)
+- **DOW** — close above a rising 40-week MA: 77%
+- **TFA** — Minervini Trend Template family (price > 50/150/200-day MAs,
+  200-day rising, ≥1.3× 52-week low, ≥0.75× 52-week high): 84%
+- **MOM** — 52-week-high proximity + 126-day return, cross-sectionally
+  ranked: 87%
+- **CON, OPF, VAL, ERN** — not pinned down: multi-criteria definitions and
+  an unknown fundamentals source; agreement caps at 65-75%
+
+The ceiling is the data basis: RPCI computes on TradingView data and its
+own fundamentals, so published bits do not uniquely determine formulas.
+The mirror remains the only exact path; these findings are the best
+independent approximation available from public data.
+
 ## Notes
 
 - The scan is for research and education. It is not investment advice and
