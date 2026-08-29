@@ -152,10 +152,11 @@ export function GuideModal({ scan, onClose }: { scan: ScanResult; onClose: () =>
             </button>
           </div>
           <p className="readline">
-            Each session every scanned name is read against eleven conditions — two fundamental, one relative, eight of
-            price and volume structure. One pass is one point; a stock&rsquo;s score is how many of the eleven it clears
-            tonight. Nine or more marks the strongest tape. Every formula below runs on public end-of-day data and is
-            documented exactly as implemented.
+            Each session every scanned name is read against eleven technical and fundamental conditions by the RPCI
+            pipeline; this dashboard mirrors those published readings. One pass is one point; a stock&rsquo;s score is
+            how many of the eleven it clears tonight. Nine or more marks the strongest tape. The computational
+            definitions live inside RPCI&rsquo;s indicator and are not published, so each condition below shows its
+            result vocabulary instead of a formula.
           </p>
           {scan.conditions.map((c, i) => (
             <div key={c.key} className="gcond">

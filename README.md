@@ -1,36 +1,36 @@
 # Scorebook
 
-A daily, eleven-condition checklist scan of liquid NSE stocks. Every session,
-each name in the universe is scored 0-11 against documented trend, momentum
-and contraction checks. The dashboard shows breadth history, what moved,
-per-condition pass rates, sector rankings, and a fully filterable table with
-CSV and TradingView exports.
+A daily mirror of RPCI's published eleven-condition scan
+([rpci.stratlab.in](https://rpci.stratlab.in/)). Every session, each of the
+~999 scanned names carries a 0-11 score, its eleven condition readings, and
+120 sessions of score history. The dashboard shows breadth history, what
+moved, per-condition pass rates, sector rankings, and a fully filterable
+table with CSV and TradingView exports.
 
-This is an independent, open implementation of the "daily 11-point scan"
-dashboard pattern. The condition definitions live in `src/lib/conditions.ts`
-and are shown in full inside the app ("How to read").
+## What is mirrored, what is not
+
+RPCI computes its conditions server-side in a private pipeline and publishes
+only the resulting readings. This project mirrors those **published values
+verbatim** — scores, condition results, breadth stats and movers are
+identical to what rpci.stratlab.in shows for the same session.
+
+The formulas are not published, so there is nothing to reimplement here.
+The mirror fetches the public page once per day, asserts the payload's
+invariants (a row's score must equal its own count of passing conditions),
+and rewrites it into this app's schema.
 
 ## How data updates
 
-There is no serverless fetching and no API key. The dataset is built from
-NSE's public end-of-day bhavcopy archive and committed to the repo:
+There is no serverless fetching and no API key:
 
-- `scripts/update.ts` downloads missing sessions, appends them to
-  `data/bars.json` (adjusting history for splits and bonuses using the
-  exchange's own previous-close field), then regenerates `public/scan.json`.
+- `scripts/fetch-rpci.ts` fetches the public dashboard, extracts the session
+  payload, joins company names from the screener-backed cache
+  (`data/fundamentals.json`), and writes `public/scan.json`.
 - A GitHub Action (`.github/workflows/update.yml`) runs this every weekday
-  at 17:50 IST after the bhavcopy is published, and commits the result.
+  at 20:00 IST after RPCI's evening scan is published, and commits the
+  result.
 - Vercel redeploys on the push. Users always load a static `scan.json`
   from the CDN, so the site is fast and never breaks on a flaky upstream.
-
-First run (initial backfill, ~15 minutes, polite pacing):
-
-```bash
-npm install
-npx tsx scripts/update.ts --days 550
-```
-
-Later runs download only the missing sessions.
 
 ## Deploy to Vercel
 
@@ -42,23 +42,24 @@ Later runs download only the missing sessions.
 ## Local development
 
 ```bash
-npm run dev
+npm install
+npx tsx scripts/fetch-rpci.ts   # refresh the dataset
+npm run dev                     # dashboard at localhost:3000
 ```
 
 ## Layout
 
-- `src/lib/conditions.ts` - the eleven conditions, documented
-- `src/lib/engine.ts` - scoring, history, held, movers, breadth, sectors
-- `src/lib/nse.ts` - bhavcopy download and parsing (curl-backed)
-- `src/lib/universe.ts` - the scanned universe with sector and F&O tags
-- `scripts/update.ts` - the daily pipeline
+- `scripts/fetch-rpci.ts` - the daily mirror pipeline
+- `src/lib/engine.ts` - the former independent scan engine, retained for
+  reference
+- `src/lib/conditions.ts` - the former condition implementations, retained
+  for reference
 - `src/components/` - the dashboard
 
-## Maintenance notes
+## Notes
 
-- F&O membership and sector tags in `universe.ts` drift as NSE revises
-  lists; edit entries there when needed.
-- Symbols renamed on the exchange accumulate history from the rename date;
-  the engine skips names with fewer than ~210 sessions automatically.
 - The scan is for research and education. It is not investment advice and
   this project is not a SEBI-registered adviser or research analyst.
+- RPCI's indicator is invite-only; the dashboard it publishes is public.
+  If RPCI changes its page shape or restricts access, the mirror's payload
+  assertions fail loudly in CI rather than publishing a broken table.

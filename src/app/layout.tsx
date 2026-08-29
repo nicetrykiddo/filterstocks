@@ -15,9 +15,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Scorebook: daily eleven-condition scan",
+  title: "Scorebook: RPCI eleven-condition scan mirror",
   description:
-    "Every liquid NSE and BSE stock scored against eleven documented technical and fundamental conditions after each session, with breadth history, movers, condition pass rates and exportable lists.",
+    "Mirror of RPCI's published eleven-condition daily scan (rpci.stratlab.in): every score, condition reading, breadth history and mover, with filtering and export.",
   robots: { index: true, follow: true },
 };
 
