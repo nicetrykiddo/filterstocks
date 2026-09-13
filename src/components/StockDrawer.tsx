@@ -152,11 +152,12 @@ export function GuideModal({ scan, onClose }: { scan: ScanResult; onClose: () =>
             </button>
           </div>
           <p className="readline">
-            Each session every scanned name is read against eleven technical and fundamental conditions by the RPCI
-            pipeline; this dashboard mirrors those published readings. One pass is one point; a stock&rsquo;s score is
-            how many of the eleven it clears tonight. Nine or more marks the strongest tape. The computational
-            definitions live inside RPCI&rsquo;s indicator and are not published, so each condition below shows its
-            result vocabulary instead of a formula.
+            Each session every scanned name is read against eleven technical and fundamental conditions — the same
+            parameters the RPCI reference scan publishes. One pass is one point; a stock&rsquo;s score is how many of
+            the eleven it clears tonight. Nine or more marks the strongest tape. Every condition is computed by
+            Scorebook&rsquo;s own engine from exchange end-of-day data, and its formula is documented below; the
+            reference keeps its formulas private, so where they could not be recovered exactly the thresholds were
+            calibrated against its published pass rates.
           </p>
           {scan.conditions.map((c, i) => (
             <div key={c.key} className="gcond">

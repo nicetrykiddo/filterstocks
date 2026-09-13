@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# price store: 30 MB cache, rides the Actions cache instead of git
+data/bars.json

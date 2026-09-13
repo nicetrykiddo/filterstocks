@@ -1,13 +1,17 @@
-name: Daily scan mirror
+name: Daily scan
 
-# Fetches RPCI's published daily scan after its evening run, commits the
-# converted artifact. A push to main is what makes Vercel redeploy, so this
-# workflow is the heartbeat of the site: run it, commit scan.json, let Vercel
-# pick it up.
+# Computes the scan with our own engine after the close (bhavcopy archives
+# for both exchanges publish by ~19:00 IST), verifies the payload, checks
+# parity against RPCI's published readings when a fresh reference payload
+# exists, and commits public/scan.json. The push is what makes Vercel
+# redeploy: run it, verify it, commit it, let Vercel pick it up.
+#
+# data/bars.json (the 30 MB price store) is not tracked in git; it rides the
+# Actions cache and falls back to a full backfill on a cold cache.
 
 on:
   schedule:
-    # 14:30 UTC = 20:00 IST, after RPCI's live evening scan is published.
+    # 14:30 UTC = 20:00 IST, after both exchanges' bhavcopies are out.
     - cron: "30 14 * * 1-5"
   workflow_dispatch: {}
 
@@ -21,7 +25,7 @@ concurrency:
 jobs:
   update:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -29,14 +33,29 @@ jobs:
         with:
           node-version: 22
 
+      - name: Restore price store
+        uses: actions/cache@v4
+        with:
+          path: data/bars.json
+          key: bars-${{ github.run_id }}
+          restore-keys: |
+            bars-
+
       - name: Install dependencies
         run: npm ci
 
       - name: Install tsx
         run: npm install --no-save tsx
 
-      - name: Mirror dataset
-        run: tsx scripts/fetch-rpci.ts
+      - name: Run the scan pipeline
+        run: tsx scripts/update.ts
+
+      - name: Verify payload invariants
+        run: tsx scripts/verify.ts
+
+      - name: Parity check against the reference
+        run: tsx scripts/parity.ts
+        continue-on-error: true
 
       - name: Commit if changed
         run: |
@@ -46,6 +65,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes; dataset already current."
           else
-            git commit -m "data: scan mirror $(date -u +%F)"
+            git commit -m "data: daily scan $(date -u +%F)"
             git push
           fi

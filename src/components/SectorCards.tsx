@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { SectorAgg } from "@/lib/types";
 
 const SCALE_MAX = 11;
@@ -32,11 +32,20 @@ export function SectorCards({
   onSelect: (name: string | null) => void;
 }) {
   const [tip, setTip] = useState<{ x: number; y: number; s: SectorAgg } | null>(null);
+  const tipRef = useRef<HTMLDivElement | null>(null);
   const ordered = [...sectors.filter((s) => s.n >= 5), ...sectors.filter((s) => s.n < 5)];
 
   function enter(e: React.MouseEvent, s: SectorAgg) {
     setTip({ x: e.clientX + 14, y: e.clientY + 12, s });
   }
+
+  // The tooltip never wraps; clamp it inside the viewport once painted.
+  useLayoutEffect(() => {
+    const el = tipRef.current;
+    if (!el || !tip) return;
+    const x = Math.min(tip.x, window.innerWidth - el.offsetWidth - 12);
+    el.style.left = `${Math.max(12, x)}px`;
+  }, [tip]);
 
   return (
     <>
@@ -89,7 +98,7 @@ export function SectorCards({
         })}
       </div>
       {tip ? (
-        <div className="tip" style={{ position: "fixed", left: tip.x, top: tip.y, opacity: 1 }}>
+        <div ref={tipRef} className="tip" style={{ position: "fixed", left: tip.x, top: tip.y, opacity: 1 }}>
           <b>{tip.s.name}</b>
           <br />
           <em>mean</em> {tip.s.mean.toFixed(2)} / 11

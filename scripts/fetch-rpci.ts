@@ -1,17 +1,19 @@
 /**
- * RPCI mirror pipeline.
+ * Reference fetcher.
  *
  *   tsx scripts/fetch-rpci.ts
  *
  * Fetches the public RPCI daily-scan dashboard (rpci.stratlab.in), extracts
- * the session payload it ships, and rewrites it into this app's scan.json
- * schema so the existing UI renders it unchanged. One polite request per
- * run; the payload is what any browser visitor receives.
+ * the session payload it ships, and rewrites it into this app's ScanResult
+ * schema under data/reference/scan-<session>.json. The file is the yardstick
+ * for scripts/calibrate.ts and scripts/parity.ts — the engine's agreement
+ * with the reference's published readings is measured against it. One polite
+ * request per run; the payload is what any browser visitor receives.
  *
  * RPCI computes its eleven conditions server-side and does not publish the
- * formulas — this pipeline mirrors the published readings, not the logic.
- * Every mirrored value is asserted (score must equal its own count of
- * passing conditions) before anything is written.
+ * formulas — this fetcher archives the published readings, it does not feed
+ * the dashboard (the dashboard is computed by our own engine via
+ * scripts/update.ts).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -29,7 +31,7 @@ import type {
 } from "../src/lib/types";
 
 const ROOT = path.resolve(__dirname, "..");
-const SCAN_FILE = path.join(ROOT, "public", "scan.json");
+const REF_DIR = path.join(ROOT, "data", "reference");
 const FUND_FILE = path.join(ROOT, "data", "fundamentals.json");
 
 const RPCI_URL = "https://rpci.stratlab.in/";
@@ -289,10 +291,11 @@ async function main() {
   }
   if (scan.conds.length !== 11) throw new Error(`conds ${scan.conds.length}`);
 
-  fs.mkdirSync(path.dirname(SCAN_FILE), { recursive: true });
-  fs.writeFileSync(SCAN_FILE, JSON.stringify(scan));
+  fs.mkdirSync(REF_DIR, { recursive: true });
+  const outFile = path.join(REF_DIR, `scan-${scan.session}.json`);
+  fs.writeFileSync(outFile, JSON.stringify(scan));
   console.log(
-    `mirrored ${scan.session}: ${scan.run.clean} scanned, ${scan.run.quar} quarantined, ` +
+    `archived ${outFile}: ${scan.run.clean} scanned, ${scan.run.quar} quarantined, ` +
       `n9 ${scan.breadth.n9}, mean ${scan.breadth.mean}, movers ${scan.trans.nUp}+${scan.trans.nDn}`,
   );
 }

@@ -5,7 +5,6 @@ import {
   ABBREVS,
   SLUGS,
   evaluateAt,
-  momentumScore,
   precompute,
   type Pre,
   type SessionCtx,
@@ -159,33 +158,57 @@ export function runScan(
     }
   }
 
-  // ---- sweep 1: blended momentum scores per trace session ----
-  const momScores: Map<string, (number | null)[]> = new Map();
-  for (const pr of prepared) {
-    const arr: (number | null)[] = new Array(traceLen).fill(null);
-    for (let t = 0; t < traceLen; t++) {
+  // ---- sweep 1: momentum ranks per trace session ----
+  // Two cross-sectional features drive the momentum reading: 52-week-high
+  // proximity (close / rolling 250-session high) and the 126-session return.
+  // Each is percentile-ranked across the scanned names for that session; the
+  // combined rank is their mean, so a name must lead on both axes at once.
+  const momRanks: Map<string, (number | null)[]> = new Map();
+  for (const pr of prepared) momRanks.set(pr.u.symbol, new Array(traceLen).fill(null));
+  for (let t = 0; t < traceLen; t++) {
+    const hiOf = new Map<string, number>();
+    const retOf = new Map<string, number>();
+    const hiVals: number[] = [];
+    const retVals: number[] = [];
+    for (const pr of prepared) {
       const li = pr.localOfDate.get(traceDates[t]);
       if (li === undefined) continue;
-      const idxAt = indexDates.get(traceDates[t])!;
-      arr[t] = momentumScore(pr.p, li, indexCloses, idxAt);
+      const hi52 = pr.p.hi52[li];
+      if (hi52 !== null && hi52 > 0) {
+        const hi = pr.p.close[li] / hi52;
+        hiOf.set(pr.u.symbol, hi);
+        hiVals.push(hi);
+      }
+      if (li >= CONFIG.momReturnWindow) {
+        const ret = pr.p.close[li] / pr.p.close[li - CONFIG.momReturnWindow] - 1;
+        retOf.set(pr.u.symbol, ret);
+        retVals.push(ret);
+      }
     }
-    momScores.set(pr.u.symbol, arr);
+    hiVals.sort((a, b) => a - b);
+    retVals.sort((a, b) => a - b);
+    for (const pr of prepared) {
+      const hi = hiOf.get(pr.u.symbol);
+      const ret = retOf.get(pr.u.symbol);
+      if (hi === undefined || ret === undefined) continue;
+      momRanks.get(pr.u.symbol)![t] =
+        (percentileRank(hiVals, hi) + percentileRank(retVals, ret)) / 2;
+    }
   }
 
   // ---- sweep 2: eleven-condition evaluation per trace session ----
   const scoreMatrix = new Map<string, (number | null)[]>();
   const bitMatrix = new Map<string, (number | null)[]>();
+  let lastCtx: SessionCtx | null = null;
 
   for (let t = 0; t < traceLen; t++) {
-    const ctx: SessionCtx = { pePctile, momPctile: new Map() };
-    const spread: Array<{ sym: string; v: number }> = [];
+    const momPctile = new Map<string, number>();
     for (const pr of prepared) {
-      const v = momScores.get(pr.u.symbol)![t];
-      if (v !== null) spread.push({ sym: pr.u.symbol, v });
+      const v = momRanks.get(pr.u.symbol)![t];
+      if (v !== null) momPctile.set(pr.u.symbol, v);
     }
-    // Percentile rank binary-searches, so the reference array must be sorted.
-    const sortedSpread = spread.map((x) => x.v).sort((a, b) => a - b);
-    for (const { sym, v } of spread) ctx.momPctile.set(sym, percentileRank(sortedSpread, v));
+    const ctx: SessionCtx = { pePctile, momPctile };
+    if (t === traceLen - 1) lastCtx = ctx;
 
     for (const pr of prepared) {
       const li = pr.localOfDate.get(traceDates[t]);
@@ -205,6 +228,7 @@ export function runScan(
       bitMatrix.set(pr.u.symbol, bArr);
     }
   }
+  if (!lastCtx) throw new Error("no sessions traced; scan cannot run");
 
   // ---- size bands + index tags ----
   // Bands ride the actual NSE index tags (Midcap = NIFTY Midcap 150,
@@ -242,17 +266,8 @@ export function runScan(
     const p = pr.p;
     const idxAt = indexDates.get(traceDates[lastT])!;
 
-    // Rebuild today's momentum percentile for this name from stored raw
-    // scores — identical to the sweep-2 context, computed locally.
-    const todaysSpread: number[] = [];
-    for (const other of prepared) {
-      const v = momScores.get(other.u.symbol)![lastT];
-      if (v !== null) todaysSpread.push(v);
-    }
-    todaysSpread.sort((a, b) => a - b);
-    const mine = momScores.get(pr.u.symbol)![lastT]!;
-    const mp = percentileRank(todaysSpread, mine);
-    const ctx: SessionCtx = { pePctile, momPctile: new Map([[pr.u.symbol, mp]]) };
+    // Tonight's cross-sectional context is exactly sweep 2's last session.
+    const ctx: SessionCtx = lastCtx;
 
     const readings = evaluateAt(p, li, pr.u.symbol, ctx, toFund(pr.fund), indexCloses, idxAt);
     let bits = 0;
@@ -275,6 +290,9 @@ export function runScan(
     const band = (bandOfSym.get(pr.u.symbol) ?? "") as StockRow["band"];
     const idx = [...(pr.u.idx ?? [])];
     if (band === "Microcap") idx.push("microcap250");
+    // The table's universe filter matches idx tags, so the band-derived
+    // Largecap tag rides idx like the index tags do.
+    if (band === "Largecap") idx.push("largecap");
 
     rows.push({
       symbol: pr.u.symbol,

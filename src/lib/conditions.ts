@@ -1,16 +1,18 @@
 import type { Bar, ConditionDoc } from "./types";
-import { fractalPivots, median, rsi, sma, atr } from "./indicators";
+import { median, rsi, sma, rollingMax, rollingMin, atr } from "./indicators";
 
 /**
  * The scan reads every stock against eleven conditions each session: two
  * fundamental checks, one relative-momentum check, and eight price/volume
  * structure checks. Each pass is one point; the score is the sum (0–11).
  *
- * The result vocabulary (Undervalued, Stage 2 - Uptrend, …) matches the
- * reference dashboard this scan reproduces; the formulas underneath are this
- * repo's own, documented openly here because the reference keeps them
- * private. Thresholds are calibrated so per-condition pass rates track the
- * reference's published distribution (scripts/calibrate.ts).
+ * Eight of the eleven formulas below were recovered by grid-searching
+ * hypothesis families against RPCI's published readings (see
+ * scripts/recover.ts and scripts/parity.ts): they reproduce the reference's
+ * published pass/fail bits on the overlap session at the agreement rates
+ * printed by scripts/parity.ts. The remaining three (VAL, ERN, CON) are
+ * calibrated so per-condition pass rates track the reference's published
+ * distribution (scripts/calibrate.ts). Everything here is documented openly.
  */
 
 export const COND_DOCS: ConditionDoc[] = [
@@ -19,9 +21,9 @@ export const COND_DOCS: ConditionDoc[] = [
     label: "Valuation",
     abbrev: "VAL",
     slug: "valuation",
-    short: "Trailing P/E against the universe, in thirds.",
+    short: "Trailing P/E against the universe, in bands.",
     detail:
-      "The stock's trailing P/E (Screener.in, refreshed weekly) is ranked against every other scanned name. The cheapest third reads Undervalued, the middle third Reasonably valued, the richest third Overvalued. Names with no P/E — losses, blank filings — read N/A and cannot pass.",
+      "The stock's trailing P/E (Screener.in, refreshed weekly) is ranked against every other scanned name. The cheapest 45% read Undervalued, the next band up to 73% reads Reasonably valued, and the richest 27% read Overvalued. Names with no P/E — losses, blank filings — read N/A and cannot pass.",
   },
   {
     key: "ern",
@@ -30,16 +32,16 @@ export const COND_DOCS: ConditionDoc[] = [
     slug: "earnings_power",
     short: "Profit growth and returns on equity, together.",
     detail:
-      "Strong requires trailing-twelve-month profit growth of at least the calibrated floor AND return on equity at or above the calibrated floor. Both come from the weekly fundamentals cache. Either falling short reads Weak.",
+      "Strong requires trailing-twelve-month profit growth of at least 22% AND return on equity of at least 8%. Both come from the weekly fundamentals cache. Either falling short — or missing filings — reads Weak.",
   },
   {
     key: "mom",
     label: "Momentum",
     abbrev: "MOM",
     slug: "momentum",
-    short: "Blended 3- and 6-month excess return vs the index.",
+    short: "Near its 52-week high AND a strong six-month return.",
     detail:
-      "The average of the stock's 63-session and 126-session returns minus the Nifty 50's over the same windows. Ranked across the universe: the top decile reads Very Strong momentum, roughly the next sixth reads Strong momentum, everything else Weak momentum.",
+      "Each session every scanned name is ranked, cross-sectionally, on two features: how close its close sits to its 250-session high, and its 126-session return. The two ranks are averaged; roughly the top quarter of the market reads Strong momentum and roughly the top six percent reads Very Strong momentum. Names with short tapes read Weak rather than guessing.",
   },
   {
     key: "con",
@@ -48,16 +50,16 @@ export const COND_DOCS: ConditionDoc[] = [
     slug: "price_contraction",
     short: "ATR% below its own six-month norm.",
     detail:
-      "The 14-session ATR as a percentage of price, divided by its own median over the last 120 sessions. At or below parity the day ranges are shrinking relative to their recent norm — supply and demand are agreeing on smaller increments.",
+      "The 14-session ATR as a percentage of price, divided by its own median over the last 120 sessions. At or below a calibrated multiple of that norm, day ranges are shrinking relative to their recent behaviour — supply and demand are agreeing on smaller increments.",
   },
   {
     key: "tfa",
     label: "Timeframe Alignment",
     abbrev: "TFA",
     slug: "timeframe_alignment",
-    short: "Daily and weekly averages stacked upward.",
+    short: "The Minervini trend template, clause by clause.",
     detail:
-      "On the daily tape the close sits above the 20- and 50-day averages with the 20 above the 50 and the 50 above the 150; on the weekly tape the close sits above a rising 30-week average. Both timeframes agree, or the condition fails.",
+      "On the daily tape: close above the 50-, 150- and 200-day averages, the 50 above the 150, the 200-day average rising over the last twenty sessions, the close at least 1.3× its 52-week low, and no further than 25% below its 52-week high. Every clause must hold; one miss fails the condition.",
   },
   {
     key: "opf",
@@ -73,9 +75,9 @@ export const COND_DOCS: ConditionDoc[] = [
     label: "Institutional Candles",
     abbrev: "INS",
     slug: "institutional_candles",
-    short: "High-volume bullish days in the last ten sessions.",
+    short: "High-volume bullish days in the last twenty sessions.",
     detail:
-      "A candle qualifies when it closes up, closes in the top third of its range, and trades at least the calibrated multiple of its 50-day volume — the footprint of size leaning on the offer. The reading is the count over ten sessions; anything above zero passes.",
+      "A candle qualifies when it closes up, closes in the top two-thirds of its range, and trades at least nine times its 50-day average volume — the footprint of size leaning on the offer. The reading is the count over the last twenty sessions; anything above zero passes.",
   },
   {
     key: "stx",
@@ -84,7 +86,7 @@ export const COND_DOCS: ConditionDoc[] = [
     slug: "st_extension",
     short: "Not stretched above the 20-day average.",
     detail:
-      "Fails when RSI(14) reaches the calibrated ceiling or the close stands more than two ATRs above the 20-day average — a pullback-prone stretch. It passes almost every name almost every night, which is the point: when it does fail, it matters.",
+      "Fails when RSI(14) reaches 87 or the close stands 5.5 ATRs above the 20-day average — a pullback-prone stretch. It passes almost every name almost every night, which is the point: when it does fail, it matters.",
   },
   {
     key: "ltx",
@@ -93,25 +95,25 @@ export const COND_DOCS: ConditionDoc[] = [
     slug: "lt_extension",
     short: "Not parabolic above the 50-day average.",
     detail:
-      "Fails when the close stands more than the calibrated percentage above its 50-day average. Vertical moves mean-revert before bases can form; the condition refuses to score them while they last.",
+      "Fails when the close stands 30% or more above its 50-day average. Vertical moves mean-revert before bases can form; the condition refuses to score them while they last.",
   },
   {
     key: "stg",
     label: "Stage Analysis",
     abbrev: "STG",
     slug: "stage_analysis",
-    short: "Weinstein stage from the 30-week average.",
+    short: "Stage from the 40-week average.",
     detail:
-      "Price above a rising 30-week average with relative strength improving reads Stage 2 - Uptrend and passes. Price below a falling one reads Stage 4 - Downtrend. Everything in between — bases and tops — reads Not Confirmed and fails until it resolves.",
+      "Price above a rising 40-week average reads Stage 2 - Uptrend and passes. Price below a falling one reads Stage 4 - Downtrend. Everything in between — above a flat average, below a rising one — reads Not Confirmed and fails until it resolves.",
   },
   {
     key: "dow",
     label: "Dow Theory (W)",
     abbrev: "DOW",
     slug: "dow_theory_w",
-    short: "Weekly swing structure: highs and lows agreeing.",
+    short: "Primary trend from the 40-week average.",
     detail:
-      "Fractal swing pivots on the weekly chart over the past six months. Higher highs with higher lows read Uptrend; lower highs with lower lows read Downtrend; anything mixed reads Sideways. Only Uptrend passes.",
+      "A close above the 40-week average reads Uptrend and passes; a close below a falling one reads Downtrend. Mixed states — below a flat or rising average — read Sideways and fail. On weekly data the 40-week average is slow enough to ignore most swing noise.",
   },
 ];
 
@@ -119,41 +121,70 @@ export const LABELS = COND_DOCS.map((d) => d.label);
 export const ABBREVS = COND_DOCS.map((d) => d.abbrev);
 export const SLUGS = COND_DOCS.map((d) => d.slug);
 
-/** Calibrated constants; scripts/calibrate.ts tunes these against the reference distribution. */
+/** Scan constants; scripts/calibrate.ts tunes the calibrated ones against the reference distribution. */
 export const CONFIG = {
   /** Sessions of score history traced on the dashboard. */
   trace: 270,
   /**
-   * Minimum daily sessions before a name can be scored at all. Set low on
-   * purpose: conditions degrade to their safe reading (FAIL, or PASS for the
-   * extension checks that have no basis without history) instead of
-   * quarantining the name, so fresh listings are scored exactly like the
-   * reference dashboard scores them.
+   * Minimum daily sessions before a name can be scored at all. Set to the
+   * bare minimum on purpose: conditions degrade to their safe reading (FAIL,
+   * or PASS for the extension checks that have no basis to call a name
+   * extended) instead of quarantining the name, so fresh listings are scored
+   * exactly like the reference dashboard scores them — 999/999, 0 quarantined.
    */
-  minSessions: 65,
+  minSessions: 2,
 
-  valUndertop: 50,
-  valReasonableTop: 82,
+  // VAL — P/E percentile bands, matched to the reference's published value
+  // split (45% Undervalued, 73% cumulative pass among names with a P/E).
+  valUndertop: 45,
+  valReasonableTop: 73,
 
-  ernGrowthFloor: 20,
-  ernRoeFloor: 14,
+  // ERN — calibrated floors on the weekly fundamentals cache.
+  ernGrowthFloor: 22,
+  ernRoeFloor: 8,
 
-  momVeryStrong: 91,
-  momStrong: 77,
+  // MOM — percentile cuts on the combined 52-week-high proximity and
+  // 126-session return rank (calibrated to the reference's tier sizes).
+  momVeryStrong: 89,
+  momStrong: 75,
+  /** Window for the 52-week-high proximity feature, in sessions. */
+  momProximityWindow: 250,
+  /** Sessions for the return leg of the momentum feature. */
+  momReturnWindow: 126,
 
-  conRatio: 0.86,
+  // CON — ATR% versus its own 120-session median (calibrated multiple).
+  conRatio: 0.84,
 
-  opfMargin: 9,
+  // OPF — 252-session excess return over the Nifty 50, in percentage points.
+  opfMargin: 4,
 
-  insVolMult: 4.5,
-  insWindow: 10,
+  // INS — recovered family, thresholds re-derived on our bhavcopy volume
+  // basis: up-close in the top two-thirds of the range on ≥9× the 50-day
+  // average volume, any occurrence inside the window.
+  insVolMult: 9,
+  insWindow: 20,
+  insClosePos: 2 / 3,
 
-  stxRsi: 96,
-  stxAtrMult: 4.5,
+  // STX — recovered at full agreement: RSI ceiling and ATR-multiple stretch.
+  stxRsi: 87,
+  stxAtrMult: 5.5,
 
-  ltxAboveMa50: 1.42,
+  // LTX — recovered at 99% agreement.
+  ltxAboveMa50: 1.3,
 
-  dowLookbackWeeks: 52,
+  // TFA — recovered Minervini trend-template family.
+  tfaFromLow: 1.3,
+  tfaFromHigh: 0.75,
+  tfaRisingLag: 20,
+
+  // STG — recovered stage rule: price above a rising 40-week average (the
+  // window that reproduces the reference's stage labels on our data basis).
+  stgWeeks: 40,
+  stgRisingLagWeeks: 5,
+
+  // DOW — recovered primary-trend rule: close above the 40-week average.
+  dowWeeks: 40,
+  dowLagWeeks: 5,
 };
 
 export interface StockFundamentals {
@@ -179,12 +210,16 @@ export interface Pre {
   atrPctMed120: (number | null)[];
   rsi14: (number | null)[];
   volSma50: (number | null)[];
+  /** Rolling 250-session high/low of closes (52-week proximity features). */
+  hi52: (number | null)[];
+  lo52: (number | null)[];
   /** Most recent completed week index for each daily session (forward-filled). */
   weekAsOf: number[];
   weeklyClose: number[];
   weeklyHigh: number[];
   weeklyLow: number[];
   wma30: (number | null)[];
+  wma40: (number | null)[];
 }
 
 function weekKey(date: string): string {
@@ -196,42 +231,53 @@ function weekKey(date: string): string {
   return monday.toISOString().slice(0, 10);
 }
 
-/** Rolling median via insertion-sorted window. */
+/**
+ * Rolling median over the trailing n sessions, ignoring gaps. Exact: each
+ * window holds the values of precisely the last n indices, so a null never
+ * evicts a real observation. A window needs at least 40 observations to
+ * publish a median.
+ */
 function rollingMedian(xs: (number | null)[], n: number): (number | null)[] {
   const out: (number | null)[] = new Array(xs.length).fill(null);
-  const win: number[] = [];
+  // Sorted by value (ties by index); the FIFO ring tracks expiry order.
+  const sorted: Array<{ v: number; idx: number }> = [];
+  const ring: Array<{ v: number; idx: number }> = [];
   for (let i = 0; i < xs.length; i++) {
     const v = xs[i];
-    if (v === null) continue;
-    let lo = 0;
-    let hi = win.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (win[mid] < v) lo = mid + 1;
-      else hi = mid;
+    if (v !== null) {
+      const item = { v, idx: i };
+      let lo = 0;
+      let hi = sorted.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        const o = sorted[mid];
+        if (o.v < v || (o.v === v && o.idx < i)) lo = mid + 1;
+        else hi = mid;
+      }
+      sorted.splice(lo, 0, item);
+      ring.push(item);
     }
-    win.splice(lo, 0, v);
-    if (win.length > n) win.splice(lowerBound(win, xs[i - n] ?? -Infinity), 1);
-    if (win.length >= Math.min(n, 40)) out[i] = median(win);
+    while (ring.length && ring[0].idx <= i - n) {
+      const dead = ring.shift()!;
+      let lo = 0;
+      let hi = sorted.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        const o = sorted[mid];
+        if (o.v < dead.v || (o.v === dead.v && o.idx < dead.idx)) lo = mid + 1;
+        else hi = mid;
+      }
+      sorted.splice(lo, 1);
+    }
+    if (ring.length >= Math.min(n, 40)) out[i] = median(sorted.map((s) => s.v));
   }
   return out;
-}
-
-function lowerBound(arr: number[], v: number): number {
-  let lo = 0;
-  let hi = arr.length;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (arr[mid] < v) lo = mid + 1;
-    else hi = mid;
-  }
-  return lo;
 }
 
 export function precompute(bars: Bar[]): Pre {
   const closes = bars.map((b) => b.close);
   const atr14 = atr(bars.map((b) => b.high), bars.map((b) => b.low), closes, 14);
-  const atrPct = atr14.map((a, i) => (a === null || closes[i] > 0 ? (a ?? 0) / closes[i] : null));
+  const atrPct = atr14.map((a, i) => (a !== null && closes[i] > 0 ? a / closes[i] : null));
   // Weekly buckets: a session carries the week index only on the week's last
   // observed session; weekAsOf forward-fills so any session reads its most
   // recent completed week.
@@ -274,7 +320,6 @@ export function precompute(bars: Bar[]): Pre {
       weekAsOf[i] = last;
     }
   }
-  const wma30 = sma(weeklyClose, 30);
   return {
     dates: bars.map((b) => b.date),
     open: bars.map((b) => b.open),
@@ -291,11 +336,14 @@ export function precompute(bars: Bar[]): Pre {
     atrPctMed120: rollingMedian(atrPct, 120),
     rsi14: rsi(closes, 14),
     volSma50: sma(bars.map((b) => b.volume), 50),
+    hi52: rollingMax(closes, CONFIG.momProximityWindow),
+    lo52: rollingMin(closes, CONFIG.momProximityWindow),
     weekAsOf,
     weeklyClose,
     weeklyHigh,
     weeklyLow,
-    wma30,
+    wma30: sma(weeklyClose, 30),
+    wma40: sma(weeklyClose, CONFIG.dowWeeks),
   };
 }
 
@@ -303,7 +351,11 @@ export function precompute(bars: Bar[]): Pre {
 export interface SessionCtx {
   /** PE percentile (0–100) per symbol; static between fundamentals refreshes. */
   pePctile: Map<string, number>;
-  /** Momentum-score percentile per symbol, recomputed every session. */
+  /**
+   * Combined momentum rank (0–100) per symbol, recomputed every session: the
+   * mean of the name's 52-week-high proximity percentile and its 126-session
+   * return percentile.
+   */
   momPctile: Map<string, number>;
 }
 
@@ -314,8 +366,8 @@ export interface Reading {
 
 /**
  * Evaluate all eleven conditions for one symbol at daily index i.
- * Returns null entries where history is insufficient; the caller treats any
- * null as "not scoreable tonight".
+ * Readings degrade to their safe value where history is insufficient, so a
+ * fresh listing is scored rather than dropped.
  */
 export function evaluateAt(
   p: Pre,
@@ -330,6 +382,7 @@ export function evaluateAt(
   const s20 = p.sma20[i];
   const s50 = p.sma50[i];
   const s150 = p.sma150[i];
+  const s200 = p.sma200[i];
   const a = p.atr14[i];
   const aPct = p.atrPct[i];
   const aPctMed = p.atrPctMed120[i];
@@ -337,7 +390,7 @@ export function evaluateAt(
 
   // ---- 1 Valuation ----
   const pePct = ctx.pePctile.get(sym);
-  let val: Reading | null = null;
+  let val: Reading;
   if (fund.pe === null || fund.pe === undefined || fund.pe <= 0 || pePct === undefined) {
     val = { value: "N/A", pass: false };
   } else if (pePct < CONFIG.valUndertop) val = { value: "Undervalued", pass: true };
@@ -364,14 +417,15 @@ export function evaluateAt(
   // ---- 4 Contraction ----
   const con = aPct !== null && aPctMed !== null && aPct <= aPctMed * CONFIG.conRatio;
 
-  // ---- 5 Timeframe Alignment ----
-  const wIdx = p.weekAsOf[i];
-  const wma = wIdx >= 0 ? p.wma30[wIdx] : null;
-  const wmaPast = wIdx - 5 >= 0 ? p.wma30[wIdx - 5] : null;
+  // ---- 5 Timeframe Alignment (Minervini trend template) ----
+  const hi52 = p.hi52[i];
+  const lo52 = p.lo52[i];
+  const s200Prev = i >= CONFIG.tfaRisingLag ? p.sma200[i - CONFIG.tfaRisingLag] : null;
   const tfa =
-    s20 !== null && s50 !== null && s150 !== null &&
-    c > s20 && s20 > s50 && c > s150 && s50 > s150 &&
-    wma !== null && c > wma && wmaPast !== null && wma > wmaPast;
+    s50 !== null && s150 !== null && s200 !== null && s200Prev !== null &&
+    hi52 !== null && lo52 !== null && lo52 > 0 &&
+    c > s50 && c > s150 && c > s200 && s50 > s150 && s200 > s200Prev &&
+    c >= CONFIG.tfaFromLow * lo52 && c >= CONFIG.tfaFromHigh * hi52;
 
   // ---- 6 Outperformance ----
   let opf = false;
@@ -390,7 +444,7 @@ export function evaluateAt(
       const rng = h - l;
       const vRef = p.volSma50[j];
       if (vRef === null || vRef <= 0 || rng <= 0) continue;
-      if (cl > o && (cl - l) / rng >= 2 / 3 && p.volume[j] >= vRef * CONFIG.insVolMult) insCount++;
+      if (cl > o && (cl - l) / rng >= CONFIG.insClosePos && p.volume[j] >= vRef * CONFIG.insVolMult) insCount++;
     }
   }
 
@@ -402,60 +456,25 @@ export function evaluateAt(
   // ---- 9 Long-term Extension ----
   const ltxExtended = s50 !== null && c >= s50 * CONFIG.ltxAboveMa50;
 
-  // ---- 10 Stage Analysis ----
+  // ---- 10 Stage Analysis (weekly) ----
   let stg: Reading = { value: "Not Confirmed", pass: false };
-  if (wIdx >= 0 && wma !== null && wmaPast !== null) {
+  const wIdx = p.weekAsOf[i];
+  const wma = wIdx >= 0 ? p.wma40[wIdx] : null;
+  const wmaPrev = wIdx - CONFIG.stgRisingLagWeeks >= 0 ? p.wma40[wIdx - CONFIG.stgRisingLagWeeks] : null;
+  if (wma !== null && wmaPrev !== null) {
     const above = c > wma;
-    const rising = wma > wmaPast;
-    let rsImproving = false;
-    if (wIdx - 10 >= 0) {
-      const wC = p.weeklyClose[wIdx];
-      const wC10 = p.weeklyClose[wIdx - 10];
-      rsImproving = wC / wC10 > 1;
-    }
-    if (above && rising && rsImproving) stg = { value: "Stage 2 - Uptrend", pass: true };
+    const rising = wma > wmaPrev;
+    if (above && rising) stg = { value: "Stage 2 - Uptrend", pass: true };
     else if (!above && !rising) stg = { value: "Stage 4 - Downtrend", pass: false };
   }
 
-  // ---- 11 Dow Theory (weekly swings) ----
+  // ---- 11 Dow Theory (weekly primary trend) ----
   let dow: Reading = { value: "Sideways", pass: false };
-  if (wIdx >= 13) {
-    // Adaptive lookback: at least 13 completed weeks, up to the full year.
-    const lookback = Math.min(CONFIG.dowLookbackWeeks, wIdx + 1);
-    const fromW = wIdx - lookback + 1;
-    const hs = p.weeklyHigh.slice(fromW, wIdx + 1);
-    const ls = p.weeklyLow.slice(fromW, wIdx + 1);
-    const ph = fractalPivots(hs, 2).filter((x) => x.high);
-    const pl = fractalPivots(ls, 2).filter((x) => !x.high);
-    if (ph.length < 2 || pl.length < 2) {
-      // Sparse swings: read the primary trend from the 20-week rate of change
-      // instead of leaving the name unclassified. Requires half a year of
-      // weekly tape first, so a 14-week listing stays Sideways rather than
-      // riding one lucky quarter.
-      if (wIdx >= 30) {
-        const ret20 = p.weeklyClose[wIdx] / p.weeklyClose[Math.max(0, wIdx - 20)] - 1;
-        dow =
-          ret20 > 0.02 ? { value: "Uptrend", pass: true }
-          : ret20 < -0.02 ? { value: "Downtrend", pass: false }
-          : { value: "Sideways", pass: false };
-      }
-    } else {
-      // Equal swings read as holding the structure, not breaking it. Three
-      // signed votes — swing highs, swing lows, and the 20-week rate of
-      // change — settle the label; a single agreeing fact is not enough to
-      // call a primary trend either way.
-      const ret20 = p.weeklyClose[wIdx] / p.weeklyClose[Math.max(0, wIdx - 20)] - 1;
-      const voteH = ph[ph.length - 1].price >= ph[ph.length - 2].price ? 1 : -1;
-      const voteL = pl[pl.length - 1].price >= pl[pl.length - 2].price ? 1 : -1;
-      const voteT = ret20 > 0.08 ? 1 : ret20 < -0.08 ? -1 : 0;
-      // Structure leads; the trend vote confirms or breaks ties. A bare
-      // trend vote without any swing agreement leaves the name Sideways.
-      const votes = voteH + voteL + voteT;
-      const structure = Math.sign(voteH + voteL);
-      if (structure > 0 ? votes >= 0 : votes >= 1) dow = { value: "Uptrend", pass: true };
-      else if (structure < 0 ? votes <= 0 : votes <= -1) dow = { value: "Downtrend", pass: false };
-      else dow = { value: "Sideways", pass: false };
-    }
+  const wma40 = wIdx >= 0 ? p.wma40[wIdx] : null;
+  const wma40Prev = wIdx - CONFIG.dowLagWeeks >= 0 ? p.wma40[wIdx - CONFIG.dowLagWeeks] : null;
+  if (wma40 !== null && wma40Prev !== null) {
+    if (c > wma40) dow = { value: "Uptrend", pass: true };
+    else if (wma40 < wma40Prev) dow = { value: "Downtrend", pass: false };
   }
 
   const momReading: Reading = { value: momValue, pass: momValue !== "Weak momentum" };
@@ -480,7 +499,8 @@ export function evaluateAt(
 
 /**
  * Blended momentum score for one symbol/session: mean of the 63- and 126-
- * session excess returns vs the index, in percent. Null until both windows fit.
+ * session excess returns vs the index, in percent. Null until both windows
+ * fit. Retained as a research feature for the recovery harnesses.
  */
 export function momentumScore(
   p: Pre,

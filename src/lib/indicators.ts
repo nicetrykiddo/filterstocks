@@ -11,22 +11,31 @@ export function sma(xs: number[], n: number): (number | null)[] {
   return out;
 }
 
+/**
+ * Sliding-window maximum via a monotonic deque: each index enters and leaves
+ * the deque once, so the whole series costs O(length) regardless of n.
+ */
 export function rollingMax(xs: number[], n: number): (number | null)[] {
   const out: (number | null)[] = new Array(xs.length).fill(null);
-  for (let i = n - 1; i < xs.length; i++) {
-    let m = -Infinity;
-    for (let j = i - n + 1; j <= i; j++) if (xs[j] > m) m = xs[j];
-    out[i] = m;
+  const dq: number[] = []; // indices, values decreasing
+  for (let i = 0; i < xs.length; i++) {
+    while (dq.length && xs[dq[dq.length - 1]] <= xs[i]) dq.pop();
+    dq.push(i);
+    if (dq[0] <= i - n) dq.shift();
+    if (i >= n - 1) out[i] = xs[dq[0]];
   }
   return out;
 }
 
+/** Sliding-window minimum; the monotonic-deque mirror of rollingMax. */
 export function rollingMin(xs: number[], n: number): (number | null)[] {
   const out: (number | null)[] = new Array(xs.length).fill(null);
-  for (let i = n - 1; i < xs.length; i++) {
-    let m = Infinity;
-    for (let j = i - n + 1; j <= i; j++) if (xs[j] < m) m = xs[j];
-    out[i] = m;
+  const dq: number[] = []; // indices, values increasing
+  for (let i = 0; i < xs.length; i++) {
+    while (dq.length && xs[dq[dq.length - 1]] >= xs[i]) dq.pop();
+    dq.push(i);
+    if (dq[0] <= i - n) dq.shift();
+    if (i >= n - 1) out[i] = xs[dq[0]];
   }
   return out;
 }

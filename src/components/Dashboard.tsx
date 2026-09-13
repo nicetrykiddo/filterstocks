@@ -264,25 +264,26 @@ export function Dashboard() {
       <footer className="foot">
         <div className="leg">{scan.labels.map((l, i) => `${i + 1} ${scan.abbrevs[i]} ${l}`).join("  ·  ")}</div>
         <div>
-          Mirrors the published readings of{" "}
+          Computed by Scorebook&rsquo;s own engine from NSE and BSE end-of-day data over {scan.universeNote}. The
+          eleven parameters and their result vocabulary follow{" "}
           <a
             href="https://rpci.stratlab.in/"
             target="_blank"
             rel="noopener noreferrer"
             style={{ color: "var(--text-secondary)", textDecoration: "underline" }}
           >
-            RPCI&rsquo;s eleven-condition scan
-          </a>{" "}
-          ({scan.universeNote}). Scanned {scan.run.clean} of {scan.run.total}, {scan.run.quar} quarantined. Conditions are
-          computed by the RPCI pipeline; the formulas are not published, so the values are mirrored as published.
+            RPCI&rsquo;s published eleven-condition scan
+          </a>
+          , and every formula is documented in the reading guide. Scanned {scan.run.clean} of {scan.run.total},{" "}
+          {scan.run.quar} quarantined.
         </div>
         <div className="dis">
-          Scorebook is a mirror of RPCI&rsquo;s published eleven-condition readings, presented for research and
-          educational use. It is not investment advice and not a recommendation to buy or sell any security. Scorebook
-          is not a SEBI-registered investment adviser or research analyst.
+          Scorebook is an independent daily scan presented for research and educational use. It is not investment
+          advice and not a recommendation to buy or sell any security. Scorebook is not a SEBI-registered investment
+          adviser or research analyst.
         </div>
         <div className="num" style={{ marginTop: 8 }}>
-          session {scan.session} · mirrored{" "}
+          session {scan.session} · computed{" "}
           {new Date(scan.generatedAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })} IST · history since{" "}
           {scan.histMeta.fromPretty}
         </div>

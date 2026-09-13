@@ -171,7 +171,7 @@ async function main() {
   const argv = process.argv.slice(2);
   const force = argv.includes("--force");
   const delayIdx = argv.indexOf("--delay");
-  const delay = delayIdx !== -1 ? Number(argv[delayIdx + 1]) : 350;
+  const delay = delayIdx !== -1 ? Number(argv[delayIdx + 1]) : 500;
 
   const cache = loadCache();
   const todo = UNIVERSE.filter((u) => {
@@ -191,6 +191,7 @@ async function main() {
 
   let done = 0;
   let failed = 0;
+  let degraded = 0;
   for (const u of todo) {
     const slug = encodeURIComponent(u.symbol);
     let html = await curlText(`https://www.screener.in/company/${slug}/consolidated/`, 2);
@@ -225,6 +226,26 @@ async function main() {
     }
 
     if (parsed) {
+      const prev = cache[u.symbol];
+      // A throttled page still carries the h1 and market cap but no ratio
+      // list; never let such a shell overwrite good cached ratios.
+      const ratiosMissing =
+        parsed.pe === null && parsed.roe === null && parsed.profitGrowthTtm === null;
+      const hadRatios =
+        !!prev &&
+        [prev.pe, prev.roe, prev.profitGrowthTtm].some((x) => x !== null && x !== undefined);
+      if (ratiosMissing && hadRatios) {
+        degraded++;
+        parsed = {
+          ...parsed,
+          pe: prev.pe ?? null,
+          roe: prev.roe ?? null,
+          profitGrowthTtm: prev.profitGrowthTtm ?? null,
+          broadSector: parsed.broadSector || prev.broadSector || "",
+          sector: parsed.sector || prev.sector || "",
+          industry: parsed.industry || prev.industry || "",
+        };
+      }
       cache[u.symbol] = { ...parsed, fetchedAt: new Date().toISOString() };
       done++;
     } else {
@@ -244,14 +265,14 @@ async function main() {
     }
     if ((done + failed) % 25 === 0) {
       fs.writeFileSync(OUT, JSON.stringify(cache));
-      console.log(`  ${done + failed}/${todo.length} processed (${done} ok, ${failed} failed)`);
+      console.log(`  ${done + failed}/${todo.length} processed (${done} ok, ${failed} failed, ${degraded} shells kept old ratios)`);
     }
     await new Promise((r) => setTimeout(r, delay + Math.random() * delay));
   }
 
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   fs.writeFileSync(OUT, JSON.stringify(cache));
-  console.log(`fundamentals cached: ${Object.keys(cache).length} entries (${done} fresh, ${failed} misses)`);
+  console.log(`fundamentals cached: ${Object.keys(cache).length} entries (${done} fresh, ${failed} misses, ${degraded} shells kept old ratios)`);
 }
 
 main();
