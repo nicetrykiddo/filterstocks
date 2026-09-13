@@ -44,17 +44,14 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install tsx
-        run: npm install --no-save tsx
-
       - name: Run the scan pipeline
-        run: tsx scripts/update.ts
+        run: npx tsx scripts/update.ts
 
       - name: Verify payload invariants
-        run: tsx scripts/verify.ts
+        run: npx tsx scripts/verify.ts
 
       - name: Parity check against the reference
-        run: tsx scripts/parity.ts
+        run: npx tsx scripts/parity.ts
         continue-on-error: true
 
       - name: Commit if changed
